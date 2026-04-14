@@ -49,7 +49,9 @@ console.log('--- scale_add (2 scales + 1 add, elementwise) ---');
 console.log('size   iters   wasm (ms)   js (ms)    js/wasm');
 console.log('-----  ------  ----------  ---------  --------');
 for (const n of [64, 128, 256, 512]) {
-  const iters = Math.max(20, Math.floor(2000 * (64 / n) ** 2));
+  // Almide's __alloc is bump-only; cap iters at large sizes so total
+  // wasm memory stays under ~500MB (and bench survives).
+  const iters = n >= 256 ? 20 : Math.max(20, Math.floor(2000 * (64 / n) ** 2));
   const a = makeRandom(n, n, 1);
   const b = makeRandom(n, n, 2);
   const w = timeIt(() => scale_add(a, b, 1.5, -0.5), iters);
