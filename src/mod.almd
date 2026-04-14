@@ -1227,13 +1227,11 @@ fn generate_dts(iface_json: String, module_name: String) -> String = {
 
 fn generate_package_json(module_name: String, version: String) -> String = {
   // Minimal npm package.json for a wasm-bindgen-style Almide module.
-  // Keep key order stable so output is diff-friendly.
-  //
-  // NOTE: lines are joined with "\n" instead of baking "\n" into each
-  // interpolated literal. Almide codegen currently inlines such literals
-  // as real Rust source newlines, which the Rust formatter then re-indents,
-  // leaking 4 spaces into the runtime output. See issue log 0007.
-  // (Bug 1 fixed in almide 0.14.3+: String-typed if branches now auto-coerce)
+  // Includes:
+  //   - sideEffects: false → bundlers (webpack/Vite/esbuild) can tree-shake
+  //     dead Almide exports out of the consumer bundle
+  //   - engines.node ≥18 → require global fetch / BigInt support
+  //   - keywords for npm search visibility
   let v = if version == "" then "0.1.0" else version
   [
     "{",
@@ -1242,7 +1240,10 @@ fn generate_package_json(module_name: String, version: String) -> String = {
     "  \"type\": \"module\",",
     "  \"main\": \"${module_name}.js\",",
     "  \"types\": \"${module_name}.d.ts\",",
-    "  \"files\": [\"${module_name}.js\", \"${module_name}.d.ts\", \"${module_name}.wasm\"]",
+    "  \"sideEffects\": false,",
+    "  \"engines\": { \"node\": \">=18\" },",
+    "  \"keywords\": [\"wasm\", \"webassembly\", \"almide\"],",
+    "  \"files\": [\"${module_name}.js\", \"${module_name}.d.ts\", \"${module_name}.wasm\", \"${module_name}.wit\"]",
     "}",
     "",
   ] |> list.join("\n")

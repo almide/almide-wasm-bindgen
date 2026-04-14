@@ -116,6 +116,17 @@ test "generate_package_json output parses as JSON" {
   assert_eq(json.as_string(json.get(parsed, "main") ?? json.null()) ?? "", "mylib.js")
 }
 
+test "generate_package_json includes sideEffects/engines/keywords" {
+  let s = wasm_bindgen.generate_package_json("mylib", "1.2.3")
+  assert(string.contains(s, "\"sideEffects\": false"))
+  assert(string.contains(s, "\"engines\""))
+  assert(string.contains(s, "\"node\": \">=18\""))
+  assert(string.contains(s, "\"keywords\""))
+  assert(string.contains(s, "\"wasm\""))
+  // wit file is now in files[]
+  assert(string.contains(s, "\"mylib.wit\""))
+}
+
 // ═══════════════════════════════════════════════════════
 // is_supported_ty / is_supported_fn
 // ═══════════════════════════════════════════════════════
@@ -692,6 +703,52 @@ test "generate_esm emits _writeMatrix / _readMatrix with zero-copy view" {
   assert(string.contains(esm, "new Float64Array(buf, ptr + 8, rows * cols)"))
   // Write uses Float64Array.set when input is a typed array
   assert(string.contains(esm, "out.set(data)"))
+}
+
+// ═══════════════════════════════════════════════════════
+// JSDoc emission in .d.ts
+// ═══════════════════════════════════════════════════════
+test "generate_dts emits Almide-style signature in JSDoc" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"greet\"," +
+    "\"params\":[{\"name\":\"name\",\"type\":{\"kind\":\"string\"}}]," +
+    "\"return\":{\"kind\":\"string\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "Almide signature: `fn greet(name: String) -> String`"))
+}
+
+test "generate_dts emits @throws hint for effect fn" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"read_config\"," +
+    "\"params\":[{\"name\":\"path\",\"type\":{\"kind\":\"string\"}}]," +
+    "\"return\":{\"kind\":\"string\"}," +
+    "\"effect\":true," +
+    "\"error\":{\"kind\":\"string\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "Almide signature: `effect fn read_config(path: String) -> String`"))
+  assert(string.contains(dts, "@throws if the effect fn returned an error"))
+}
+
+test "almide_type_str renders compounds" {
+  let list_int = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.almide_type_str(list_int), "List[Int]")
+  let opt_str = json.object([
+    ("kind", json.from_string("option")),
+    ("inner", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.almide_type_str(opt_str), "Option[String]")
+  let named = json.object([
+    ("kind", json.from_string("named")),
+    ("name", json.from_string("Point")),
+  ]);
+  assert_eq(wasm_bindgen.almide_type_str(named), "Point")
 }
 
 test "generate_dts emits fn signature referencing record type" {
