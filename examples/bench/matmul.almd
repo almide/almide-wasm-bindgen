@@ -1,0 +1,5 @@
+// Matrix multiplication benchmark source — compiled to WASM and compared
+// with an equivalent pure-JS implementation in matmul_bench.mjs.
+fn matmul(a: Matrix, b: Matrix) -> Matrix = matrix.mul(a, b)
+fn scale2(m: Matrix) -> Matrix = matrix.scale(m, 2.0)
+effect fn main() -> () = { println("ok") }

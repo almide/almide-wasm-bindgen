@@ -1,0 +1,12 @@
+import fs
+import env
+import self as wasm_bindgen
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let iface_path = list.get(args, 0) ?? "/tmp/iface.json"
+  let module_name = list.get(args, 1) ?? "hello"
+  let iface_json = fs.read_text(iface_path)!
+  let wit = wasm_bindgen.generate_wit(iface_json, module_name)
+  println(wit)
+}

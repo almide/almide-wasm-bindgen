@@ -38,8 +38,16 @@ test "ts_type maps unit to void" {
 }
 
 test "ts_type falls back to unknown" {
-  let ty = json.object([("kind", json.from_string("list"))]);
+  let ty = json.object([("kind", json.from_string("variant"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "unknown")
+}
+
+test "ts_type handles list of int" {
+  let ty = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.ts_type(ty), "number[]")
 }
 
 // ═══════════════════════════════════════════════════════
@@ -148,7 +156,8 @@ test "is_supported_fn accepts simple fn" {
   assert(wasm_bindgen.is_supported_fn(greet))
 }
 
-test "is_supported_fn rejects fn with list param" {
+test "is_supported_fn rejects fn with list without inner" {
+  // list with no inner kind → list_inner_supported returns false
   let bad = json.object([
     ("name", json.from_string("sum")),
     ("params", json.array([
@@ -160,6 +169,550 @@ test "is_supported_fn rejects fn with list param" {
     ("return", json.object([("kind", json.from_string("int"))])),
   ])
   assert(not wasm_bindgen.is_supported_fn(bad))
+}
+
+test "is_supported_fn accepts List[Int]" {
+  let fn_val = json.object([
+    ("name", json.from_string("sum")),
+    ("params", json.array([
+      json.object([
+        ("name", json.from_string("xs")),
+        ("type", json.object([
+          ("kind", json.from_string("list")),
+          ("inner", json.object([("kind", json.from_string("int"))])),
+        ])),
+      ]),
+    ])),
+    ("return", json.object([("kind", json.from_string("int"))])),
+  ])
+  assert(wasm_bindgen.is_supported_fn(fn_val))
+}
+
+// ═══════════════════════════════════════════════════════
+// List[Int] marshalling
+// ═══════════════════════════════════════════════════════
+test "to_wasm dispatches List[Int] to _writeListInt" {
+  let ty = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "xs"), "_writeListInt(xs)")
+}
+
+test "from_wasm dispatches List[Int] to _readListInt" {
+  let ty = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readListInt(p)")
+}
+
+test "generate_dts emits number[] for List[Int] return" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"double_each\",\"params\":[{\"name\":\"xs\",\"type\":{\"kind\":\"list\",\"inner\":{\"kind\":\"int\"}}}],\"return\":{\"kind\":\"list\",\"inner\":{\"kind\":\"int\"}}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "export function double_each(xs: number[]): number[];"))
+}
+
+test "generate_esm includes _writeListInt / _readListInt helpers" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeListInt"))
+  assert(string.contains(esm, "function _readListInt"))
+  assert(string.contains(esm, "setBigInt64"))
+}
+
+test "generate_esm wraps List[Int] arg and result" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"sum\",\"params\":[{\"name\":\"xs\",\"type\":{\"kind\":\"list\",\"inner\":{\"kind\":\"int\"}}}],\"return\":{\"kind\":\"int\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "Number(_exports.sum(_writeListInt(xs)))"))
+}
+
+test "to_wasm dispatches List[Float] / List[Bool]" {
+  let list_float = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("float"))])),
+  ]);
+  let list_bool = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("bool"))])),
+  ]);
+  assert_eq(wasm_bindgen.to_wasm(list_float, "xs"), "_writeListFloat(xs)")
+  assert_eq(wasm_bindgen.to_wasm(list_bool, "xs"), "_writeListBool(xs)")
+  assert_eq(wasm_bindgen.from_wasm(list_float, "p"), "_readListFloat(p)")
+  assert_eq(wasm_bindgen.from_wasm(list_bool, "p"), "_readListBool(p)")
+}
+
+test "generate_esm includes List[Float] / List[Bool] helpers" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeListFloat"))
+  assert(string.contains(esm, "function _readListFloat"))
+  assert(string.contains(esm, "setFloat64"))
+  assert(string.contains(esm, "function _writeListBool"))
+  assert(string.contains(esm, "function _readListBool"))
+}
+
+test "generate_dts emits boolean[] and number[] for list variants" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"sum_f\",\"params\":[{\"name\":\"xs\",\"type\":{\"kind\":\"list\",\"inner\":{\"kind\":\"float\"}}}],\"return\":{\"kind\":\"float\"}}," +
+    "{\"name\":\"all_true\",\"params\":[{\"name\":\"bs\",\"type\":{\"kind\":\"list\",\"inner\":{\"kind\":\"bool\"}}}],\"return\":{\"kind\":\"bool\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "sum_f(xs: number[]): number"))
+  assert(string.contains(dts, "all_true(bs: boolean[]): boolean"))
+}
+
+test "to_wasm / from_wasm dispatch List[String]" {
+  let ty = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "xs"), "_writeListString(xs)")
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readListString(p)")
+}
+
+test "generate_dts emits string[] for List[String]" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"shout_all\",\"params\":[{\"name\":\"xs\",\"type\":{\"kind\":\"list\",\"inner\":{\"kind\":\"string\"}}}],\"return\":{\"kind\":\"list\",\"inner\":{\"kind\":\"string\"}}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "shout_all(xs: string[]): string[]"))
+}
+
+test "generate_esm includes List[String] helpers" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeListString"))
+  assert(string.contains(esm, "function _readListString"))
+}
+
+// ═══════════════════════════════════════════════════════
+// Option[T] marshalling
+// ═══════════════════════════════════════════════════════
+test "ts_type maps Option[Int] to number | null" {
+  let ty = json.object([
+    ("kind", json.from_string("option")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.ts_type(ty), "number | null")
+}
+
+test "ts_type maps Option[String] to string | null" {
+  let ty = json.object([
+    ("kind", json.from_string("option")),
+    ("inner", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.ts_type(ty), "string | null")
+}
+
+test "to_wasm / from_wasm dispatch Option[Int] / Option[String]" {
+  let opt_int = json.object([
+    ("kind", json.from_string("option")),
+    ("inner", json.object([("kind", json.from_string("int"))])),
+  ]);
+  let opt_str = json.object([
+    ("kind", json.from_string("option")),
+    ("inner", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.to_wasm(opt_int, "v"), "_writeOptionInt(v)")
+  assert_eq(wasm_bindgen.to_wasm(opt_str, "v"), "_writeOptionString(v)")
+  assert_eq(wasm_bindgen.from_wasm(opt_int, "p"), "_readOptionInt(p)")
+  assert_eq(wasm_bindgen.from_wasm(opt_str, "p"), "_readOptionString(p)")
+}
+
+test "generate_dts emits Option[T] | null types" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"try_halve\",\"params\":[{\"name\":\"n\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"option\",\"inner\":{\"kind\":\"int\"}}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "try_halve(n: number): number | null"))
+}
+
+test "generate_esm includes all Option helpers" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeOptionInt"))
+  assert(string.contains(esm, "function _readOptionInt"))
+  assert(string.contains(esm, "function _writeOptionFloat"))
+  assert(string.contains(esm, "function _writeOptionBool"))
+  assert(string.contains(esm, "function _writeOptionString"))
+  assert(string.contains(esm, "if (v === null || v === undefined) return 0"))
+}
+
+test "is_supported_fn accepts Option[Int] return" {
+  let fn_val = json.object([
+    ("name", json.from_string("try_halve")),
+    ("params", json.array([
+      json.object([
+        ("name", json.from_string("n")),
+        ("type", json.object([("kind", json.from_string("int"))])),
+      ]),
+    ])),
+    ("return", json.object([
+      ("kind", json.from_string("option")),
+      ("inner", json.object([("kind", json.from_string("int"))])),
+    ])),
+  ])
+  assert(wasm_bindgen.is_supported_fn(fn_val))
+}
+
+// ═══════════════════════════════════════════════════════
+// Result[T, E] marshalling
+// ═══════════════════════════════════════════════════════
+test "ts_type erases Result to Ok type (Err throws)" {
+  let r_int_str = json.object([
+    ("kind", json.from_string("result")),
+    ("ok",  json.object([("kind", json.from_string("int"))])),
+    ("err", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.ts_type(r_int_str), "number")
+}
+
+test "from_wasm dispatches Result[Int, String]" {
+  let ty = json.object([
+    ("kind", json.from_string("result")),
+    ("ok",  json.object([("kind", json.from_string("int"))])),
+    ("err", json.object([("kind", json.from_string("string"))])),
+  ]);
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readResultIntString(p)")
+}
+
+test "from_wasm Result with non-String err is rejected" {
+  let ty = json.object([
+    ("kind", json.from_string("result")),
+    ("ok",  json.object([("kind", json.from_string("int"))])),
+    ("err", json.object([("kind", json.from_string("int"))])),
+  ]);
+  let out = wasm_bindgen.from_wasm(ty, "p")
+  assert(string.contains(out, "unsupported"))
+}
+
+test "generate_dts emits unwrapped ok type for Result" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"safe_div\"," +
+    "\"params\":[" +
+    "{\"name\":\"a\",\"type\":{\"kind\":\"int\"}}," +
+    "{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}]," +
+    "\"return\":{\"kind\":\"result\",\"ok\":{\"kind\":\"int\"},\"err\":{\"kind\":\"string\"}}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "safe_div(a: number, b: number): number;"))
+}
+
+test "generate_esm includes Result helpers" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _readResultIntString"))
+  assert(string.contains(esm, "function _readResultStringString"))
+  assert(string.contains(esm, "function _readResultUnitString"))
+  assert(string.contains(esm, "throw new Error(_readString"))
+}
+
+test "is_supported_fn accepts Result[Int, String] return" {
+  let fn_val = json.object([
+    ("name", json.from_string("safe_div")),
+    ("params", json.array([
+      json.object([
+        ("name", json.from_string("a")),
+        ("type", json.object([("kind", json.from_string("int"))])),
+      ]),
+      json.object([
+        ("name", json.from_string("b")),
+        ("type", json.object([("kind", json.from_string("int"))])),
+      ]),
+    ])),
+    ("return", json.object([
+      ("kind", json.from_string("result")),
+      ("ok",  json.object([("kind", json.from_string("int"))])),
+      ("err", json.object([("kind", json.from_string("string"))])),
+    ])),
+  ])
+  assert(wasm_bindgen.is_supported_fn(fn_val))
+}
+
+// ═══════════════════════════════════════════════════════
+// effect fn auto-wrap (Result at ABI, T on JS surface)
+// ═══════════════════════════════════════════════════════
+test "effective_return wraps effect fn return as Result" {
+  let eff_fn = json.object([
+    ("name", json.from_string("read_config")),
+    ("params", json.array([])),
+    ("return", json.object([("kind", json.from_string("string"))])),
+    ("effect", json.from_bool(true)),
+    ("error", json.object([("kind", json.from_string("string"))])),
+  ]);
+  let eff_ret = wasm_bindgen.effective_return(eff_fn)
+  assert_eq(wasm_bindgen.get_kind(eff_ret), "result")
+  assert_eq(wasm_bindgen.get_kind(json.get(eff_ret, "ok") ?? json.null()), "string")
+  assert_eq(wasm_bindgen.get_kind(json.get(eff_ret, "err") ?? json.null()), "string")
+}
+
+test "effective_return leaves pure fn return unchanged" {
+  let pure_fn = json.object([
+    ("name", json.from_string("pure_add")),
+    ("params", json.array([])),
+    ("return", json.object([("kind", json.from_string("int"))])),
+  ]);
+  assert_eq(wasm_bindgen.get_kind(wasm_bindgen.effective_return(pure_fn)), "int")
+}
+
+test "generate_esm wraps effect fn call with _readResult helper" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"read_config\"," +
+    "\"params\":[{\"name\":\"path\",\"type\":{\"kind\":\"string\"}}]," +
+    "\"return\":{\"kind\":\"string\"}," +
+    "\"effect\":true," +
+    "\"error\":{\"kind\":\"string\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "_readResultStringString(_exports.read_config(_writeString(path)))"))
+}
+
+test "generate_dts shows T (not Result) for effect fn return" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"read_config\"," +
+    "\"params\":[{\"name\":\"path\",\"type\":{\"kind\":\"string\"}}]," +
+    "\"return\":{\"kind\":\"string\"}," +
+    "\"effect\":true," +
+    "\"error\":{\"kind\":\"string\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "read_config(path: string): string;"))
+}
+
+test "generate_esm wraps effect fn with Unit return" {
+  let iface = "{\"module\":\"m\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"write_log\"," +
+    "\"params\":[{\"name\":\"msg\",\"type\":{\"kind\":\"string\"}}]," +
+    "\"return\":{\"kind\":\"unit\"}," +
+    "\"effect\":true," +
+    "\"error\":{\"kind\":\"string\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "_readResultUnitString"))
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "write_log(msg: string): void"))
+}
+
+// ═══════════════════════════════════════════════════════
+// Record types
+// ═══════════════════════════════════════════════════════
+test "ts_type maps named to the type name" {
+  let ty = json.object([
+    ("kind", json.from_string("named")),
+    ("name", json.from_string("Point")),
+  ]);
+  assert_eq(wasm_bindgen.ts_type(ty), "Point")
+}
+
+test "to_wasm / from_wasm dispatch named to _writeX / _readX" {
+  let ty = json.object([
+    ("kind", json.from_string("named")),
+    ("name", json.from_string("Point")),
+  ]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "p"), "_writePoint(p)")
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readPoint(p)")
+}
+
+// Iface fragment used by the next two tests: Point record + a fn that
+// references it, so the interface/helpers pass the "referenced" filter.
+local fn _iface_with_point_fn() -> String =
+  "{\"module\":\"m\",\"version\":\"0.1.0\"," +
+    "\"types\":[" +
+    "{\"name\":\"Point\"," +
+    "\"kind\":{\"kind\":\"record\",\"fields\":[" +
+    "{\"name\":\"x\",\"type\":{\"kind\":\"float\"}}," +
+    "{\"name\":\"y\",\"type\":{\"kind\":\"float\"}}]}," +
+    "\"abi\":{\"size\":16,\"align\":8,\"fields\":[" +
+    "{\"name\":\"x\",\"offset\":0,\"size\":8}," +
+    "{\"name\":\"y\",\"offset\":8,\"size\":8}]}}]," +
+    "\"functions\":[" +
+    "{\"name\":\"origin\"," +
+    "\"params\":[]," +
+    "\"return\":{\"kind\":\"named\",\"name\":\"Point\"}}" +
+    "]}"
+
+test "generate_dts emits interface for record type" {
+  let dts = wasm_bindgen.generate_dts(_iface_with_point_fn(), "m")
+  assert(string.contains(dts, "export interface Point {"))
+  assert(string.contains(dts, "x: number;"))
+  assert(string.contains(dts, "y: number;"))
+}
+
+test "generate_esm emits _writeX / _readX helpers" {
+  let esm = wasm_bindgen.generate_esm(_iface_with_point_fn(), "m")
+  assert(string.contains(esm, "function _writePoint(obj)"))
+  assert(string.contains(esm, "function _readPoint(ptr)"))
+  assert(string.contains(esm, "_exports.__alloc(16)"))
+  assert(string.contains(esm, "view.setFloat64(ptr + 0, obj.x, true)"))
+  assert(string.contains(esm, "view.setFloat64(ptr + 8, obj.y, true)"))
+  assert(string.contains(esm, "x: view.getFloat64(ptr + 0, true)"))
+  assert(string.contains(esm, "y: view.getFloat64(ptr + 8, true)"))
+}
+
+test "generate_dts skips records not referenced by any fn" {
+  let iface = "{\"module\":\"m\",\"version\":\"0.1.0\"," +
+    "\"types\":[" +
+    "{\"name\":\"Unused\"," +
+    "\"kind\":{\"kind\":\"record\",\"fields\":[" +
+    "{\"name\":\"x\",\"type\":{\"kind\":\"int\"}}]}," +
+    "\"abi\":{\"size\":8,\"align\":8,\"fields\":[" +
+    "{\"name\":\"x\",\"offset\":0,\"size\":8}]}}]," +
+    "\"functions\":[" +
+    "{\"name\":\"add\",\"params\":[" +
+    "{\"name\":\"a\",\"type\":{\"kind\":\"int\"}}," +
+    "{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}]," +
+    "\"return\":{\"kind\":\"int\"}}]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(not string.contains(dts, "export interface Unused"))
+}
+
+test "ts_type parenthesizes union when wrapped in list" {
+  let ty = json.object([
+    ("kind", json.from_string("list")),
+    ("inner", json.object([
+      ("kind", json.from_string("option")),
+      ("inner", json.object([("kind", json.from_string("int"))])),
+    ])),
+  ])
+  assert_eq(wasm_bindgen.ts_type(ty), "(number | null)[]")
+}
+
+// ═══════════════════════════════════════════════════════
+// Variant (user-defined tagged union)
+// ═══════════════════════════════════════════════════════
+local fn _variant_shape_iface() -> String =
+  "{\"module\":\"m\",\"version\":\"0.1.0\"," +
+    "\"types\":[" +
+    "{\"name\":\"Shape\"," +
+    "\"kind\":{\"kind\":\"variant\",\"cases\":[" +
+    "{\"name\":\"Circle\",\"payload\":{\"kind\":\"tuple\",\"fields\":[{\"kind\":\"float\"}]}}," +
+    "{\"name\":\"Rect\",\"payload\":{\"kind\":\"tuple\",\"fields\":[{\"kind\":\"float\"},{\"kind\":\"float\"}]}}," +
+    "{\"name\":\"Origin\"}]}}]," +
+    "\"functions\":[" +
+    "{\"name\":\"area\"," +
+    "\"params\":[{\"name\":\"s\",\"type\":{\"kind\":\"named\",\"name\":\"Shape\"}}]," +
+    "\"return\":{\"kind\":\"float\"}}" +
+    "]}"
+
+test "generate_dts emits discriminated union for variant" {
+  let dts = wasm_bindgen.generate_dts(_variant_shape_iface(), "m")
+  assert(string.contains(dts, "export type Shape ="))
+  assert(string.contains(dts, "tag: \"Circle\""))
+  assert(string.contains(dts, "tag: \"Rect\""))
+  assert(string.contains(dts, "tag: \"Origin\""))
+  assert(string.contains(dts, "_0: number"))
+  assert(string.contains(dts, "_1: number"))
+}
+
+test "generate_esm emits _writeX / _readX for variant with tag dispatch" {
+  let esm = wasm_bindgen.generate_esm(_variant_shape_iface(), "m")
+  assert(string.contains(esm, "function _writeShape(obj)"))
+  assert(string.contains(esm, "function _readShape(ptr)"))
+  assert(string.contains(esm, "obj.tag === \"Circle\""))
+  assert(string.contains(esm, "obj.tag === \"Rect\""))
+  assert(string.contains(esm, "obj.tag === \"Origin\""))
+  assert(string.contains(esm, "case 0: return { tag: \"Circle\""))
+  assert(string.contains(esm, "case 2: return { tag: \"Origin\" };"))
+  // total size = max(4+8, 4+16, 4) = 20
+  assert(string.contains(esm, "_exports.__alloc(20)"))
+}
+
+test "variant_supported rejects variant with compound payload" {
+  let tdef = json.object([
+    ("name", json.from_string("Bad")),
+    ("kind", json.object([
+      ("kind", json.from_string("variant")),
+      ("cases", json.array([
+        json.object([
+          ("name", json.from_string("C")),
+          ("payload", json.object([
+            ("kind", json.from_string("tuple")),
+            ("fields", json.array([json.object([("kind", json.from_string("list"))])])),
+          ])),
+        ]),
+      ])),
+    ])),
+  ])
+  assert(not wasm_bindgen.variant_supported(tdef))
+}
+
+// ═══════════════════════════════════════════════════════
+// Matrix (zero-copy Float64Array view)
+// ═══════════════════════════════════════════════════════
+test "ts_type matrix maps to Matrix interface name" {
+  let ty = json.object([("kind", json.from_string("matrix"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "Matrix")
+}
+
+test "to_wasm / from_wasm dispatch matrix" {
+  let ty = json.object([("kind", json.from_string("matrix"))]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "m"), "_writeMatrix(m)")
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readMatrix(p)")
+}
+
+test "generate_dts emits Matrix interface when a fn uses it" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"mat_double\"," +
+    "\"params\":[{\"name\":\"m\",\"type\":{\"kind\":\"matrix\"}}]," +
+    "\"return\":{\"kind\":\"matrix\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "export interface Matrix {"))
+  assert(string.contains(dts, "data: Float64Array"))
+  assert(string.contains(dts, "mat_double(m: Matrix): Matrix"))
+}
+
+test "generate_dts omits Matrix interface when no fn uses it" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"add\",\"params\":[" +
+    "{\"name\":\"a\",\"type\":{\"kind\":\"int\"}}," +
+    "{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}]," +
+    "\"return\":{\"kind\":\"int\"}}]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(not string.contains(dts, "export interface Matrix"))
+}
+
+test "generate_esm emits _writeMatrix / _readMatrix with zero-copy view" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"mat_double\"," +
+    "\"params\":[{\"name\":\"m\",\"type\":{\"kind\":\"matrix\"}}]," +
+    "\"return\":{\"kind\":\"matrix\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeMatrix"))
+  assert(string.contains(esm, "function _readMatrix"))
+  assert(string.contains(esm, "new Float64Array(buf, ptr + 8, rows * cols)"))
+  // Write uses Float64Array.set when input is a typed array
+  assert(string.contains(esm, "out.set(data)"))
+}
+
+test "generate_dts emits fn signature referencing record type" {
+  let iface = "{\"module\":\"m\",\"version\":\"0.1.0\"," +
+    "\"types\":[" +
+    "{\"name\":\"Point\"," +
+    "\"kind\":{\"kind\":\"record\",\"fields\":[" +
+    "{\"name\":\"x\",\"type\":{\"kind\":\"float\"}}," +
+    "{\"name\":\"y\",\"type\":{\"kind\":\"float\"}}]}," +
+    "\"abi\":{\"size\":16,\"align\":8,\"fields\":[" +
+    "{\"name\":\"x\",\"offset\":0,\"size\":8}," +
+    "{\"name\":\"y\",\"offset\":8,\"size\":8}]}}]," +
+    "\"functions\":[" +
+    "{\"name\":\"midpoint\"," +
+    "\"params\":[" +
+    "{\"name\":\"a\",\"type\":{\"kind\":\"named\",\"name\":\"Point\"}}," +
+    "{\"name\":\"b\",\"type\":{\"kind\":\"named\",\"name\":\"Point\"}}]," +
+    "\"return\":{\"kind\":\"named\",\"name\":\"Point\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "export function midpoint(a: Point, b: Point): Point;"))
 }
 
 // ═══════════════════════════════════════════════════════

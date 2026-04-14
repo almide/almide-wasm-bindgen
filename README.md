@@ -55,6 +55,33 @@ wasm_bindgen.generate_package_json(module, version)   -> String   // package.jso
 wasm_bindgen.generate_package(iface_json, module)     -> Record   // { esm, dts, pkg }
 ```
 
+## npm publish workflow
+
+The lander produces a npm-ready `dist/`:
+
+```bash
+# Generate the package
+almide run almide-lander/src/main.almd -- \
+  --target wasm --outdir dist --pkg-version 0.1.0 mylib.almd
+
+# Optional: preview what npm would upload
+almide run almide-lander/src/main.almd -- \
+  --target wasm --outdir dist --publish-dry-run mylib.almd
+
+# Actually publish (requires npm login)
+almide run almide-lander/src/main.almd -- \
+  --target wasm --outdir dist --pkg-version 0.1.0 --publish mylib.almd
+```
+
+Or if you just want to run `npm publish` yourself:
+
+```bash
+cd dist && npm publish
+```
+
+The generated `package.json` includes the minimum fields needed for npm:
+`name`, `version`, `type: module`, `main`, `types`, `files`.
+
 ## Status
 
 **v0.0** — scaffold only. Logic lives in `almide-js/src/generate.mjs` during the port.

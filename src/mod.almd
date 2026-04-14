@@ -24,6 +24,28 @@ fn get_kind(v: Value) -> String = get_str(v, "kind")
 
 fn get_type(v: Value) -> Value = json.get(v, "type") ?? json.null()
 
+// Returns the effective return type used for JS-side marshalling.
+//   - pure fn: just `return`
+//   - effect fn: synthesizes `{kind: "result", ok: <return>, err: <error>}`
+// This mirrors how the WASM ABI actually exports effect fns: the declared
+// return type `T` is wrapped in a Result pointer so the caller can observe
+// error propagation. On the JS surface it unwraps back to T via throw/return.
+fn effective_return(fn_val: Value) -> Value = {
+  let is_effect = json.as_bool(json.get(fn_val, "effect") ?? json.from_bool(false)) ?? false
+  if is_effect then {
+    let ok_ty = json.get(fn_val, "return") ?? json.null()
+    let default_err = json.object([("kind", json.from_string("string"))])
+    let err_ty = json.get(fn_val, "error") ?? default_err
+    json.object([
+      ("kind", json.from_string("result")),
+      ("ok", ok_ty),
+      ("err", err_ty),
+    ])
+  } else {
+    json.get(fn_val, "return") ?? json.null()
+  }
+}
+
 // Supported Almide Ty kinds for v0.1 (Int/Float/Bool/String/Unit).
 // Returns true if the type has a direct JS/TS mapping at this stage.
 fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
@@ -32,8 +54,82 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
   "bool"   => true,
   "string" => true,
   "unit"   => true,
+  "list"   => list_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "option" => option_inner_supported(json.get(ty, "inner") ?? json.null()),
+  // v0.2 scope: Result is return-only. Params typed Result are a rare case
+  // and are emitted with a /* unsupported */ stub in to_wasm if reached.
+  "result" => result_supported(
+    json.get(ty, "ok") ?? json.null(),
+    json.get(ty, "err") ?? json.null()
+  ),
+  // Named refers to a user-defined record/variant. Trust that generate_esm /
+  // generate_dts will emit helpers for it; field-level validation happens
+  // when we walk iface.types[] and skip records with unsupported fields.
+  "named"  => true,
+  "matrix" => true,
   _        => false,
 }
+
+// Inline-value fields (stored by direct load/store in the record body).
+// Pointer-typed fields go through to_wasm / from_wasm with an extra
+// i32 pointer slot in the record.
+fn record_field_is_inline(ty: Value) -> Bool = match get_kind(ty) {
+  "int"   => true,
+  "float" => true,
+  "bool"  => true,
+  _       => false,
+}
+
+// True when the field of a record can be marshalled under v0.2+ scope.
+// Primitives are stored inline, pointer-typed fields (string / named /
+// matrix / list / option) are stored as i32 pointers and dispatched via
+// to_wasm / from_wasm recursively.
+fn record_field_ty_supported(ty: Value) -> Bool = match get_kind(ty) {
+  "int"    => true,
+  "float"  => true,
+  "bool"   => true,
+  "string" => true,
+  "named"  => true,
+  "matrix" => true,
+  "list"   => list_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "option" => option_inner_supported(json.get(ty, "inner") ?? json.null()),
+  _        => false,
+}
+
+// v0.2: List is supported when the element type is a primitive Almide Int.
+// Extend to float/bool/string later. Matrix[T] gets its own type (Ty::Matrix),
+// not list, so no conflict.
+fn list_inner_supported(inner: Value) -> Bool = match get_kind(inner) {
+  "int"    => true,
+  "float"  => true,
+  "bool"   => true,
+  "string" => true,
+  // Pointer-shaped inner types: delegate to is_supported_ty (mutual recursion
+  // with option_inner_supported / etc). Named is trusted.
+  "option" => is_supported_ty(inner),
+  "named"  => true,
+  "list"   => is_supported_ty(inner),
+  _        => false,
+}
+
+fn option_inner_supported(inner: Value) -> Bool = match get_kind(inner) {
+  "int"    => true,
+  "float"  => true,
+  "bool"   => true,
+  "string" => true,
+  _        => false,
+}
+
+fn result_supported(ok_ty: Value, err_ty: Value) -> Bool =
+  if get_kind(err_ty) != "string" then false
+  else match get_kind(ok_ty) {
+    "int"    => true,
+    "float"  => true,
+    "bool"   => true,
+    "string" => true,
+    "unit"   => true,
+    _        => false,
+  }
 
 // A function is eligible for export if:
 //  - it is not `main` (that is the _start entry)
@@ -43,7 +139,7 @@ fn is_supported_fn(fn_val: Value) -> Bool = {
   let name = get_str(fn_val, "name")
   if name == "main" then false
   else {
-    let ret_ok = is_supported_ty(json.get(fn_val, "return") ?? json.null())
+    let ret_ok = is_supported_ty(effective_return(fn_val))
     let params = get_arr(fn_val, "params")
     let params_ok = params |> list.fold(true, (acc, p) => acc and is_supported_ty(get_type(p)))
     ret_ok and params_ok
@@ -58,6 +154,21 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
   "bool"   => "boolean",
   "string" => "string",
   "unit"   => "void",
+  "list"   => {
+    let inner = ts_type(json.get(ty, "inner") ?? json.null())
+    // Parenthesize union / intersection inners so `T | null` inside a list
+    // becomes `(T | null)[]` not `T | null[]`.
+    if string.contains(inner, " ") then "(${inner})[]" else "${inner}[]"
+  },
+  "option" => "${ts_type(json.get(ty, "inner") ?? json.null())} | null",
+  // Result[T, E] → T on JS surface (Err is thrown, so the static type is T).
+  "result" => ts_type(json.get(ty, "ok") ?? json.null()),
+  // Named record/variant → use the type name directly. TS interface is
+  // emitted separately at the top of the .d.ts from iface.types[].
+  "named"  => get_str(ty, "name"),
+  // Matrix is always f64 at the WASM ABI level; JS surface is a named
+  // `Matrix` interface that wraps Float64Array data (zero-copy).
+  "matrix" => "Matrix",
   _        => "unknown",
 }
 
@@ -71,6 +182,10 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "bool"   => "(${expr} ? 1 : 0)",
   "string" => "_writeString(${expr})",
   "unit"   => "",
+  "list"   => list_to_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "option" => option_to_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "named"  => "_write${get_str(ty, "name")}(${expr})",
+  "matrix" => "_writeMatrix(${expr})",
   _        => expr,
 }
 
@@ -80,17 +195,605 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "bool"   => "(${expr} !== 0)",
   "string" => "_readString(${expr})",
   "unit"   => "undefined",
+  "list"   => list_from_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "option" => option_from_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "result" => result_from_wasm(
+    json.get(ty, "ok") ?? json.null(),
+    json.get(ty, "err") ?? json.null(),
+    expr
+  ),
+  "named"  => "_read${get_str(ty, "name")}(${expr})",
+  "matrix" => "_readMatrix(${expr})",
   _        => expr,
+}
+
+// List marshalling dispatch on the element type.
+// Layout: ptr → [len:i32 LE][elem * len] (elem size = byte_size(inner)).
+// List marshalling. Primitive inner types have specialized helpers with
+// their own per-slot byte size and setter/getter. Pointer-shaped inner
+// types (Option, named record, nested List) go through generic _writeListPtr /
+// _readListPtr, which stores one i32 pointer per slot and delegates
+// marshalling to the recursively-dispatched to_wasm / from_wasm expression.
+fn list_to_wasm(inner: Value, expr: String) -> String = match get_kind(inner) {
+  "int"    => "_writeListInt(${expr})",
+  "float"  => "_writeListFloat(${expr})",
+  "bool"   => "_writeListBool(${expr})",
+  "string" => "_writeListString(${expr})",
+  "option" => "_writeListPtr(${expr}, (v) => ${to_wasm(inner, "v")})",
+  "named"  => "_writeListPtr(${expr}, (v) => ${to_wasm(inner, "v")})",
+  "list"   => "_writeListPtr(${expr}, (v) => ${to_wasm(inner, "v")})",
+  _        => "/* unsupported List[${get_kind(inner)}] */${expr}",
+}
+
+fn list_from_wasm(inner: Value, expr: String) -> String = match get_kind(inner) {
+  "int"    => "_readListInt(${expr})",
+  "float"  => "_readListFloat(${expr})",
+  "bool"   => "_readListBool(${expr})",
+  "string" => "_readListString(${expr})",
+  "option" => "_readListPtr(${expr}, (p) => ${from_wasm(inner, "p")})",
+  "named"  => "_readListPtr(${expr}, (p) => ${from_wasm(inner, "p")})",
+  "list"   => "_readListPtr(${expr}, (p) => ${from_wasm(inner, "p")})",
+  _        => "/* unsupported List[${get_kind(inner)}] */${expr}",
+}
+
+// Option marshalling — Almide ABI: ptr = 0 means None, non-zero ptr means
+// Some(v) and points to an inline [value] block (no tag, no length prefix).
+fn option_to_wasm(inner: Value, expr: String) -> String = match get_kind(inner) {
+  "int"    => "_writeOptionInt(${expr})",
+  "float"  => "_writeOptionFloat(${expr})",
+  "bool"   => "_writeOptionBool(${expr})",
+  "string" => "_writeOptionString(${expr})",
+  _        => "/* unsupported Option[${get_kind(inner)}] */${expr}",
+}
+
+fn option_from_wasm(inner: Value, expr: String) -> String = match get_kind(inner) {
+  "int"    => "_readOptionInt(${expr})",
+  "float"  => "_readOptionFloat(${expr})",
+  "bool"   => "_readOptionBool(${expr})",
+  "string" => "_readOptionString(${expr})",
+  _        => "/* unsupported Option[${get_kind(inner)}] */${expr}",
+}
+
+// Result marshalling — Almide ABI: ptr → [tag:i32][value], tag=0 ok, tag=1 err.
+// JS surface: Ok(v) → return v, Err(e) → throw new Error(e as string).
+// v0.2 scope: Err type must be String (most common case; effect fn also uses this).
+fn result_from_wasm(ok_ty: Value, err_ty: Value, expr: String) -> String =
+  if get_kind(err_ty) == "string" then
+    match get_kind(ok_ty) {
+      "int"    => "_readResultIntString(${expr})",
+      "float"  => "_readResultFloatString(${expr})",
+      "bool"   => "_readResultBoolString(${expr})",
+      "string" => "_readResultStringString(${expr})",
+      "unit"   => "_readResultUnitString(${expr})",
+      _        => "/* unsupported Result[${get_kind(ok_ty)}, String] */${expr}",
+    }
+  else "/* unsupported Result[_, ${get_kind(err_ty)}] */${expr}"
+
+// ── Record helpers ──
+//
+// Each record type yields one `_write<Name>` and one `_read<Name>` JS helper.
+// Layout matches almide's emit_wasm: fields are packed sequentially in order
+// at offsets declared in iface.types[i].abi.fields[j].offset.
+
+// WASM-layout byte size for a primitive field type. **Not** the same as
+// iface.types[].abi.fields[].size, which reflects the Rust repr-c ABI used
+// by the native FFI target. The WASM emit in almide uses:
+//   Int    → 8 (i64)
+//   Float  → 8 (f64)
+//   Bool   → 4 (i32)
+//   String → 4 (i32 pointer)
+//   (other heap types) → 4 (i32 pointer)
+fn wasm_byte_size(ty: Value) -> Int = match get_kind(ty) {
+  "int"    => 8,
+  "float"  => 8,
+  "bool"   => 4,
+  "string" => 4,
+  _        => 4,
+}
+
+// Sum of wasm_byte_size over all fields. Matches almide's emit_wasm::values::record_size.
+fn wasm_record_size(fields: List[Value]) -> Int =
+  fields |> list.fold(0, (acc, f) => acc + wasm_byte_size(get_type(f)))
+
+// Running offsets for each field in WASM layout.
+fn wasm_record_offsets(fields: List[Value]) -> List[Int] = {
+  let pair = fields |> list.fold(([], 0), (state, f) => {
+    let (acc, off) = state
+    (acc + [off], off + wasm_byte_size(get_type(f)))
+  })
+  match pair { (offsets, _) => offsets }
+}
+
+// Collect all Named type names transitively referenced by a Ty node
+// (recursively into list.inner, option.inner, result.ok, result.err, and
+// record fields). Used to filter iface.types[] down to just the records
+// the user's functions actually expose, keeping stdlib records
+// (FileStat, ProcessStatus, ...) out of the generated .d.ts.
+fn collect_named_in_ty(ty: Value) -> List[String] = match get_kind(ty) {
+  "named"  => [get_str(ty, "name")],
+  "list"   => collect_named_in_ty(json.get(ty, "inner") ?? json.null()),
+  "option" => collect_named_in_ty(json.get(ty, "inner") ?? json.null()),
+  "result" => {
+    let ok_names = collect_named_in_ty(json.get(ty, "ok") ?? json.null())
+    let err_names = collect_named_in_ty(json.get(ty, "err") ?? json.null())
+    ok_names + err_names
+  },
+  _        => [],
+}
+
+// Does this type use `Matrix`? Walks compound types recursively.
+fn ty_uses_matrix(ty: Value) -> Bool = match get_kind(ty) {
+  "matrix" => true,
+  "list"   => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
+  "option" => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
+  "result" => {
+    let ok_ty = json.get(ty, "ok") ?? json.null()
+    let err_ty = json.get(ty, "err") ?? json.null()
+    ty_uses_matrix(ok_ty) or ty_uses_matrix(err_ty)
+  },
+  _        => false,
+}
+
+fn fn_uses_matrix(fn_val: Value) -> Bool = {
+  let params = get_arr(fn_val, "params")
+  let any_param = params |> list.fold(false, (acc, p) => acc or ty_uses_matrix(get_type(p)))
+  any_param or ty_uses_matrix(effective_return(fn_val))
+}
+
+fn collect_named_in_fn(fn_val: Value) -> List[String] = {
+  let params = get_arr(fn_val, "params")
+  let param_names = params |> list.flat_map((p) => collect_named_in_ty(get_type(p)))
+  let ret_names = collect_named_in_ty(effective_return(fn_val))
+  param_names + ret_names
+}
+
+// Expand names to include fields' named types (for nested records like Foo
+// containing a Bar field). Not yet supported by the record helpers but we
+// include them in the interface list so the TS compiler can resolve them.
+fn expand_named_deps(names: List[String], types: List[Value]) -> List[String] = {
+  names |> list.flat_map((name) => {
+    let def = types |> list.find((t) => get_str(t, "name") == name)
+    match def {
+      some(d) => {
+        let kind_rec = json.get(d, "kind") ?? json.null()
+        let fields = get_arr(kind_rec, "fields")
+        let inner = fields |> list.flat_map((f) => collect_named_in_ty(get_type(f)))
+        [name] + inner
+      },
+      none => [name],
+    }
+  })
+}
+
+// ── Variant helpers ──
+//
+// WASM ABI: variant values are i32 pointers to `[tag:i32][payload...]`.
+// Total alloc is max across all cases (so any value of the type fits).
+// Per-case payload = concatenated fields of the case's tuple, sequential
+// offsets starting at 4.
+//
+// JS surface: discriminated union `{ tag: 'CaseName', _0: T0, _1: T1, ... }`
+// with unit cases carrying just `{ tag: 'CaseName' }`.
+
+fn variant_case_fields(case_def: Value) -> List[Value] = {
+  let payload = json.get(case_def, "payload") ?? json.null()
+  if get_kind(payload) == "tuple" then get_arr(payload, "fields") else []
+}
+
+// WASM bytes needed for one case: 4 (tag) + sum of field sizes.
+fn variant_case_size(case_def: Value) -> Int = {
+  let fields = variant_case_fields(case_def)
+  4 + (fields |> list.fold(0, (acc, f) => acc + wasm_byte_size(f)))
+}
+
+// Variant allocation size = max across all cases.
+fn variant_alloc_size(cases: List[Value]) -> Int =
+  cases |> list.fold(4, (acc, c) => {
+    let sz = variant_case_size(c)
+    if sz > acc then sz else acc
+  })
+
+// Predicate: all payload fields of all cases are primitives.
+fn variant_case_fields_supported(case_def: Value) -> Bool = {
+  let fields = variant_case_fields(case_def)
+  fields |> list.fold(true, (acc, f) => acc and record_field_ty_supported(f))
+}
+
+fn variant_supported(type_def: Value) -> Bool = {
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  if get_kind(kind_rec) != "variant" then false
+  else {
+    let cases = get_arr(kind_rec, "cases")
+    cases |> list.fold(true, (acc, c) => acc and variant_case_fields_supported(c))
+  }
+}
+
+// Emit a TS discriminated union declaration.
+fn emit_variant_type(type_def: Value) -> List[String] = {
+  let name = get_str(type_def, "name")
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let cases = get_arr(kind_rec, "cases")
+  let case_lines = cases |> list.map((c) => {
+    let cname = get_str(c, "name")
+    let fields = variant_case_fields(c)
+    if list.is_empty(fields) then
+      "  | { tag: \"${cname}\" }"
+    else {
+      let field_strs = fields |> list.enumerate |> list.map((entry) => {
+        let (i, f) = entry
+        "_${int.to_string(i)}: ${ts_type(f)}"
+      })
+      "  | { tag: \"${cname}\"; ${field_strs |> list.join("; ")} }"
+    }
+  })
+  ["export type ${name} ="] + case_lines + [";", ""]
+}
+
+// Emit JS `_writeX` / `_readX` for a variant type.
+fn emit_variant_helpers(type_def: Value) -> List[String] = {
+  let name = get_str(type_def, "name")
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let cases = get_arr(kind_rec, "cases")
+  let size = int.to_string(variant_alloc_size(cases))
+
+  // Write branches
+  let write_branches = cases |> list.enumerate |> list.flat_map((entry) => {
+    let (tag, c) = entry
+    let cname = get_str(c, "name")
+    let fields = variant_case_fields(c)
+    let header = [
+      "  if (obj.tag === \"${cname}\") {",
+      "    view.setInt32(ptr, ${int.to_string(tag)}, true);",
+    ]
+    let pre_lines = fields |> list.enumerate |> list.flat_map((fe) => {
+      let (i, f) = fe
+      if get_kind(f) == "string" then
+        ["    const _p${int.to_string(i)} = _writeString(obj._${int.to_string(i)});"]
+      else []
+    })
+    let field_stores = fields |> list.enumerate |> list.fold(([], 4), (state, fe) => {
+      let (acc, off) = state
+      let (i, f) = fe
+      let off_s = int.to_string(off)
+      let store = match get_kind(f) {
+        "int"    => "    view.setBigInt64(ptr + ${off_s}, BigInt(obj._${int.to_string(i)}), true);",
+        "float"  => "    view.setFloat64(ptr + ${off_s}, obj._${int.to_string(i)}, true);",
+        "bool"   => "    view.setInt32(ptr + ${off_s}, obj._${int.to_string(i)} ? 1 : 0, true);",
+        "string" => "    view.setInt32(ptr + ${off_s}, _p${int.to_string(i)}, true);",
+        _        => "    /* unsupported payload */",
+      }
+      (acc + [store], off + wasm_byte_size(f))
+    })
+    let store_lines = match field_stores { (lines, _) => lines }
+    let footer = ["    return ptr;", "  }"]
+    header + pre_lines + store_lines + footer
+  })
+
+  let read_branches = cases |> list.enumerate |> list.flat_map((entry) => {
+    let (tag, c) = entry
+    let cname = get_str(c, "name")
+    let fields = variant_case_fields(c)
+    if list.is_empty(fields) then [
+      "    case ${int.to_string(tag)}: return { tag: \"${cname}\" };",
+    ]
+    else {
+      let field_reads = fields |> list.enumerate |> list.fold(([], 4), (state, fe) => {
+        let (acc, off) = state
+        let (i, f) = fe
+        let off_s = int.to_string(off)
+        let read = match get_kind(f) {
+          "int"    => "_${int.to_string(i)}: Number(view.getBigInt64(ptr + ${off_s}, true))",
+          "float"  => "_${int.to_string(i)}: view.getFloat64(ptr + ${off_s}, true)",
+          "bool"   => "_${int.to_string(i)}: view.getInt32(ptr + ${off_s}, true) !== 0",
+          "string" => "_${int.to_string(i)}: _readString(view.getInt32(ptr + ${off_s}, true))",
+          _        => "_${int.to_string(i)}: undefined",
+        }
+        (acc + [read], off + wasm_byte_size(f))
+      })
+      let read_lines = match field_reads { (lines, _) => lines }
+      [
+        "    case ${int.to_string(tag)}: return { tag: \"${cname}\", ${read_lines |> list.join(", ")} };",
+      ]
+    }
+  })
+
+  let write_block = [
+    "function _write${name}(obj) {",
+    "  const ptr = _exports.__alloc(${size});",
+    "  const view = new DataView(_exports.memory.buffer);",
+  ] + write_branches + [
+    "  throw new Error(\"Unknown ${name} tag: \" + obj.tag);",
+    "}",
+    "",
+  ]
+
+  let read_block = [
+    "function _read${name}(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  const tag = view.getInt32(ptr, true);",
+    "  switch (tag) {",
+  ] + read_branches + [
+    "    default: throw new Error(\"Unknown ${name} tag: \" + tag);",
+    "  }",
+    "}",
+    "",
+  ]
+
+  write_block + read_block
+}
+
+// Predicate: is this Record fully marshallable under v0.2 scope?
+fn record_supported(type_def: Value) -> Bool = {
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  if get_kind(kind_rec) != "record" then false
+  else {
+    let fields = get_arr(kind_rec, "fields")
+    fields |> list.fold(true, (acc, f) => acc and record_field_ty_supported(get_type(f)))
+  }
+}
+
+// Emit `_write<Name>` + `_read<Name>` JS helpers for a record type.
+// Returns a List[String] of lines to be included in generate_esm's preamble.
+//
+// Layout mirrors emit_wasm: fields packed sequentially; offsets come from
+// iface.types[i].abi.fields[j].offset. String fields are written first
+// (before outer __alloc) so memory grow does not invalidate in-flight writes.
+fn emit_record_helpers(type_def: Value) -> List[String] = {
+  let name = get_str(type_def, "name")
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let fields = get_arr(kind_rec, "fields")
+  // NOTE: iface.types[].abi is the Rust repr-c layout (for the native FFI
+  // target) and does NOT match WASM layout. We compute our own offsets using
+  // wasm_byte_size, which matches almide's emit_wasm::values::byte_size.
+  let size = int.to_string(wasm_record_size(fields))
+  let offsets = wasm_record_offsets(fields)
+
+  // Pre-compute pointer-typed fields before the outer __alloc so memory
+  // growth during nested writes does not corrupt the outer write phase.
+  // Inline-value fields (int/float/bool) are written directly into the
+  // allocated record buffer.
+  let pre_lines = fields |> list.enumerate |> list.flat_map((entry) => {
+    let (i, f) = entry
+    let ty = get_type(f)
+    let fname = get_str(f, "name")
+    if record_field_is_inline(ty) then []
+    else ["  const _f${int.to_string(i)} = ${to_wasm(ty, "obj.${fname}")};"]
+  })
+
+  let store_lines = fields |> list.enumerate |> list.map((entry) => {
+    let (i, f) = entry
+    let fname = get_str(f, "name")
+    let ty = get_type(f)
+    let off = int.to_string(list.get(offsets, i) ?? 0)
+    match get_kind(ty) {
+      "int"    => "  view.setBigInt64(ptr + ${off}, BigInt(obj.${fname}), true);",
+      "float"  => "  view.setFloat64(ptr + ${off}, obj.${fname}, true);",
+      "bool"   => "  view.setInt32(ptr + ${off}, obj.${fname} ? 1 : 0, true);",
+      _        => "  view.setInt32(ptr + ${off}, _f${int.to_string(i)}, true);",
+    }
+  })
+
+  let read_lines = fields |> list.enumerate |> list.map((entry) => {
+    let (i, f) = entry
+    let fname = get_str(f, "name")
+    let ty = get_type(f)
+    let off = int.to_string(list.get(offsets, i) ?? 0)
+    match get_kind(ty) {
+      "int"    => "    ${fname}: Number(view.getBigInt64(ptr + ${off}, true)),",
+      "float"  => "    ${fname}: view.getFloat64(ptr + ${off}, true),",
+      "bool"   => "    ${fname}: view.getInt32(ptr + ${off}, true) !== 0,",
+      _        => "    ${fname}: ${from_wasm(ty, "view.getInt32(ptr + ${off}, true)")},",
+    }
+  })
+
+  let write_block = [
+    "function _write${name}(obj) {",
+  ] + pre_lines + [
+    "  const ptr = _exports.__alloc(${size});",
+    "  const view = new DataView(_exports.memory.buffer);",
+  ] + store_lines + [
+    "  return ptr;",
+    "}",
+    "",
+  ]
+
+  let read_block = [
+    "function _read${name}(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  return {",
+  ] + read_lines + [
+    "  };",
+    "}",
+    "",
+  ]
+
+  write_block + read_block
+}
+
+// Emit a TS interface declaration for a record type.
+fn emit_record_interface(type_def: Value) -> List[String] = {
+  let name = get_str(type_def, "name")
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let fields = get_arr(kind_rec, "fields")
+  let field_lines = fields |> list.map((f) =>
+    "  ${get_str(f, "name")}: ${ts_type(get_type(f))};"
+  )
+  ["export interface ${name} {"] + field_lines + ["}", ""]
 }
 
 // ── Public API (stubs — full impl in subsequent iterations) ──
 
 fn version() -> String = "0.0.1"
 
-fn generate_esm(iface_json: String, module_name: String) -> String = {
+// ── WIT (WebAssembly Interface Type) generation ──
+//
+// WIT is the interface language for Component Model. Even though
+// `almide build --target wasm` today emits a core module (not a component),
+// emitting a .wit file lets downstream tools (jco, wasmtime componentize,
+// wit-bindgen) treat the Almide module as if it were a component.
+//
+// This is the on-ramp to P3-1 Component Model output: once Almide produces
+// a real `.wasm` component, the generated `.wit` already describes it.
+
+fn wit_type(ty: Value) -> String = match get_kind(ty) {
+  "int"    => "s64",
+  "float"  => "float64",
+  "bool"   => "bool",
+  "string" => "string",
+  "unit"   => "",
+  "list"   => "list<${wit_type(json.get(ty, "inner") ?? json.null())}>",
+  "option" => "option<${wit_type(json.get(ty, "inner") ?? json.null())}>",
+  "result" => {
+    let ok_t = wit_type(json.get(ty, "ok") ?? json.null())
+    let err_t = wit_type(json.get(ty, "err") ?? json.null())
+    if ok_t == "" then "result<_, ${err_t}>"
+    else "result<${ok_t}, ${err_t}>"
+  },
+  "named"  => wit_ident(get_str(ty, "name")),
+  // Matrix has no WIT-native representation. We model it as a record with
+  // {rows, cols, data} so downstream Component Model hosts see a flat shape.
+  "matrix" => "matrix",
+  _        => "unknown-type",
+}
+
+// Convert a CamelCase / snake_case Almide name to kebab-case for WIT.
+fn wit_ident(name: String) -> String = string.to_lower(
+  string.chars(name)
+    |> list.enumerate
+    |> list.map((entry) => {
+      let (i, c) = entry
+      if i == 0 then c
+      else if c == string.to_upper(c) and c != string.to_lower(c) then "-${c}"
+      else if c == "_" then "-"
+      else c
+    })
+    |> list.join("")
+)
+
+// Emit a WIT `record` declaration for a record type.
+fn wit_emit_record(type_def: Value) -> List[String] = {
+  let name = wit_ident(get_str(type_def, "name"))
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let fields = get_arr(kind_rec, "fields")
+  let field_lines = fields |> list.map((f) =>
+    "    ${wit_ident(get_str(f, "name"))}: ${wit_type(get_type(f))},"
+  )
+  ["  record ${name} {"] + field_lines + ["  }", ""]
+}
+
+// Emit a WIT `variant` declaration.
+fn wit_emit_variant(type_def: Value) -> List[String] = {
+  let name = wit_ident(get_str(type_def, "name"))
+  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let cases = get_arr(kind_rec, "cases")
+  let case_lines = cases |> list.map((c) => {
+    let cname = wit_ident(get_str(c, "name"))
+    let fields = variant_case_fields(c)
+    if list.is_empty(fields) then "    ${cname},"
+    else if list.len(fields) == 1 then "    ${cname}(${wit_type(list.get(fields, 0) ?? json.null())}),"
+    else {
+      let inner = fields |> list.map((f) => wit_type(f)) |> list.join(", ")
+      "    ${cname}(tuple<${inner}>),"
+    }
+  })
+  ["  variant ${name} {"] + case_lines + ["  }", ""]
+}
+
+// Emit a WIT function signature.
+fn wit_emit_fn(fn_val: Value) -> String = {
+  let name = wit_ident(get_str(fn_val, "name"))
+  let params = get_arr(fn_val, "params")
+  let ret_ty = effective_return(fn_val)
+  let params_str = params
+    |> list.map((p) => "${wit_ident(get_str(p, "name"))}: ${wit_type(get_type(p))}")
+    |> list.join(", ")
+  let ret_part = if get_kind(ret_ty) == "unit" then "" else " -> ${wit_type(ret_ty)}"
+  "  ${name}: func(${params_str})${ret_part};"
+}
+
+fn generate_wit(iface_json: String, module_name: String) -> String = {
   let iface = json.parse(iface_json) ?? json.null()
+  let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
   let supported = fns |> list.filter((f) => is_supported_fn(f))
+
+  let used_direct = supported |> list.flat_map((f) => collect_named_in_fn(f))
+  let used_names = expand_named_deps(used_direct, types)
+
+  let type_blocks = types
+    |> list.filter((t) => list.contains(used_names, get_str(t, "name")))
+    |> list.flat_map((t) => {
+      if record_supported(t) then wit_emit_record(t)
+      else if variant_supported(t) then wit_emit_variant(t)
+      else []
+    })
+
+  let fn_lines = supported |> list.map((f) => wit_emit_fn(f))
+  let iface_name = wit_ident(module_name)
+  let header = [
+    "// Generated by almide-wasm-bindgen. Do not edit.",
+    "package almide:${iface_name}@0.1.0;",
+    "",
+    "interface ${iface_name} {",
+  ]
+  let footer = ["}", "", "world ${iface_name}-world {", "  export ${iface_name};", "}", ""]
+  (header + type_blocks + fn_lines + footer) |> list.join("\n")
+}
+
+fn generate_esm(iface_json: String, module_name: String) -> String = {
+  let iface = json.parse(iface_json) ?? json.null()
+  let types = get_arr(iface, "types")
+  let fns = get_arr(iface, "functions")
+  let supported = fns |> list.filter((f) => is_supported_fn(f))
+
+  // Per-type record helpers injected after string/list/option/result helpers.
+  // Filter to only those types referenced by supported fns (same as dts).
+  let used_direct = supported |> list.flat_map((f) => collect_named_in_fn(f))
+  let used_names = expand_named_deps(used_direct, types)
+  let record_helpers = types
+    |> list.filter((t) => list.contains(used_names, get_str(t, "name")))
+    |> list.flat_map((t) => {
+      if record_supported(t) then emit_record_helpers(t)
+      else if variant_supported(t) then emit_variant_helpers(t)
+      else []
+    })
+
+  // Matrix helpers — emit only when any supported fn uses Matrix.
+  let uses_matrix = supported |> list.fold(false, (acc, f) => acc or fn_uses_matrix(f))
+  let matrix_helpers = if uses_matrix then [
+    "// --- Matrix marshalling (f64, row-major) -----------------------------",
+    "// Layout: [rows:i32 LE][cols:i32 LE][data: f64 LE * rows * cols]",
+    "// _readMatrix returns a ZERO-COPY Float64Array view; call .slice() on",
+    "// .data if the matrix must outlive any WASM memory growth.",
+    "function _writeMatrix(m) {",
+    "  const rows = m.rows | 0;",
+    "  const cols = m.cols | 0;",
+    "  const n = rows * cols;",
+    "  const ptr = _exports.__alloc(8 + n * 8);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, rows, true);",
+    "  view.setInt32(ptr + 4, cols, true);",
+    "  const data = m.data;",
+    "  const out = new Float64Array(buf, ptr + 8, n);",
+    "  if (data instanceof Float64Array) {",
+    "    out.set(data);",
+    "  } else {",
+    "    for (let i = 0; i < n; i++) out[i] = data[i];",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readMatrix(ptr) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const rows = view.getInt32(ptr, true);",
+    "  const cols = view.getInt32(ptr + 4, true);",
+    "  const data = new Float64Array(buf, ptr + 8, rows * cols);",
+    "  return { rows, cols, data };",
+    "}",
+    "",
+  ] else []
 
   // Static preamble: init() + WASI shim + string marshalling helpers.
   // Module-name interpolation only lands in the URL line.
@@ -101,10 +804,38 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "",
     "export default async function init(wasmUrl) {",
     "  const url = wasmUrl ?? new URL('./${module_name}.wasm', import.meta.url);",
+    "  // Minimal WASI shim: fd_write routes stdout/stderr through console,",
+    "  // other syscalls are no-ops. Enough for println/print-style output.",
+    "  const _decoder = new TextDecoder('utf-8');",
     "  const wasi = new Proxy({}, {",
     "    get(_t, name) {",
     "      if (name === 'proc_exit') return () => {};",
-    "      if (name === 'fd_prestat_get') return () => 8;",
+    "      if (name === 'fd_prestat_get') return () => 8;  // BADF",
+    "      if (name === 'fd_write') return (fd, iovs_ptr, iovs_len, nwritten_ptr) => {",
+    "        const mem = new DataView(_exports.memory.buffer);",
+    "        const bytes = new Uint8Array(_exports.memory.buffer);",
+    "        let total = 0;",
+    "        const chunks = [];",
+    "        for (let i = 0; i < iovs_len; i++) {",
+    "          const base = iovs_ptr + i * 8;",
+    "          const ptr = mem.getInt32(base, true);",
+    "          const len = mem.getInt32(base + 4, true);",
+    "          chunks.push(bytes.slice(ptr, ptr + len));",
+    "          total += len;",
+    "        }",
+    "        const combined = new Uint8Array(total);",
+    "        let off = 0;",
+    "        for (const c of chunks) { combined.set(c, off); off += c.length; }",
+    "        const text = _decoder.decode(combined);",
+    "        const hasNode = typeof process !== 'undefined' && process.stdout && process.stderr;",
+    "        if (fd === 2) {",
+    "          if (hasNode) process.stderr.write(text); else console.error(text);",
+    "        } else {",
+    "          if (hasNode) process.stdout.write(text); else console.log(text);",
+    "        }",
+    "        mem.setInt32(nwritten_ptr, total, true);",
+    "        return 0;",
+    "      };",
     "      return () => 0;",
     "    },",
     "  });",
@@ -142,12 +873,245 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "  return _td.decode(new Uint8Array(buf, ptr + 4, len));",
     "}",
     "",
+    "// --- List[Int] marshalling ---------------------------------------------",
+    "// Almide list layout: [len:i32 LE][i64 LE * len]. 8-byte elements for Int.",
+    "// BigInt/Number conversion loses precision above 2^53 — document for callers.",
+    "function _writeListInt(arr) {",
+    "  const len = arr.length;",
+    "  const ptr = _exports.__alloc(4 + len * 8);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, len, true);",
+    "  for (let i = 0; i < len; i++) {",
+    "    view.setBigInt64(ptr + 4 + i * 8, BigInt(arr[i]), true);",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readListInt(ptr) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const len = view.getInt32(ptr, true);",
+    "  const out = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    out[i] = Number(view.getBigInt64(ptr + 4 + i * 8, true));",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "// --- List[Float] marshalling (8-byte f64 LE elements) -----------------",
+    "function _writeListFloat(arr) {",
+    "  const len = arr.length;",
+    "  const ptr = _exports.__alloc(4 + len * 8);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, len, true);",
+    "  for (let i = 0; i < len; i++) {",
+    "    view.setFloat64(ptr + 4 + i * 8, arr[i], true);",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readListFloat(ptr) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const len = view.getInt32(ptr, true);",
+    "  const out = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    out[i] = view.getFloat64(ptr + 4 + i * 8, true);",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "// --- List[Bool] marshalling (4-byte i32 LE, 0/1) ----------------------",
+    "function _writeListBool(arr) {",
+    "  const len = arr.length;",
+    "  const ptr = _exports.__alloc(4 + len * 4);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, len, true);",
+    "  for (let i = 0; i < len; i++) {",
+    "    view.setInt32(ptr + 4 + i * 4, arr[i] ? 1 : 0, true);",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readListBool(ptr) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const len = view.getInt32(ptr, true);",
+    "  const out = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    out[i] = view.getInt32(ptr + 4 + i * 4, true) !== 0;",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "// --- List[String] marshalling (4-byte i32 ptrs to [len][utf8]) --------",
+    "// Each element is itself a string pointer, written via _writeString and",
+    "// read via _readString. Memory grown by _writeString during the loop is",
+    "// re-read from _exports.memory.buffer each iteration, so ptr stays valid.",
+    "function _writeListString(arr) {",
+    "  const len = arr.length;",
+    "  const elem_ptrs = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    elem_ptrs[i] = _writeString(arr[i]);",
+    "  }",
+    "  const ptr = _exports.__alloc(4 + len * 4);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, len, true);",
+    "  for (let i = 0; i < len; i++) {",
+    "    view.setInt32(ptr + 4 + i * 4, elem_ptrs[i], true);",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readListString(ptr) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const len = view.getInt32(ptr, true);",
+    "  const elem_ptrs = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    elem_ptrs[i] = view.getInt32(ptr + 4 + i * 4, true);",
+    "  }",
+    "  const out = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    out[i] = _readString(elem_ptrs[i]);",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "// --- Generic pointer-list helpers -------------------------------------",
+    "// For List[Option[T]] / List[Record] / List[List[_]] — elements are i32",
+    "// pointers and per-element marshalling is supplied by the caller.",
+    "// All element writes happen before the outer __alloc so memory grow does",
+    "// not invalidate in-flight pointers.",
+    "function _writeListPtr(arr, writeElem) {",
+    "  const len = arr.length;",
+    "  const elem_ptrs = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    elem_ptrs[i] = writeElem(arr[i]);",
+    "  }",
+    "  const ptr = _exports.__alloc(4 + len * 4);",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  view.setInt32(ptr, len, true);",
+    "  for (let i = 0; i < len; i++) {",
+    "    view.setInt32(ptr + 4 + i * 4, elem_ptrs[i], true);",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readListPtr(ptr, readElem) {",
+    "  const buf = _exports.memory.buffer;",
+    "  const view = new DataView(buf);",
+    "  const len = view.getInt32(ptr, true);",
+    "  const elem_ptrs = new Array(len);",
+    "  for (let i = 0; i < len; i++) {",
+    "    elem_ptrs[i] = view.getInt32(ptr + 4 + i * 4, true);",
+    "  }",
+    "  return elem_ptrs.map(readElem);",
+    "}",
+    "",
+    "// --- Option[T] marshalling ---------------------------------------------",
+    "// Almide ABI: 0 = None, otherwise ptr → [value] inline (no tag).",
+    "// JS surface: null | T.",
+    "function _writeOptionInt(v) {",
+    "  if (v === null || v === undefined) return 0;",
+    "  const ptr = _exports.__alloc(8);",
+    "  new DataView(_exports.memory.buffer).setBigInt64(ptr, BigInt(v), true);",
+    "  return ptr;",
+    "}",
+    "function _readOptionInt(ptr) {",
+    "  if (ptr === 0) return null;",
+    "  return Number(new DataView(_exports.memory.buffer).getBigInt64(ptr, true));",
+    "}",
+    "",
+    "function _writeOptionFloat(v) {",
+    "  if (v === null || v === undefined) return 0;",
+    "  const ptr = _exports.__alloc(8);",
+    "  new DataView(_exports.memory.buffer).setFloat64(ptr, v, true);",
+    "  return ptr;",
+    "}",
+    "function _readOptionFloat(ptr) {",
+    "  if (ptr === 0) return null;",
+    "  return new DataView(_exports.memory.buffer).getFloat64(ptr, true);",
+    "}",
+    "",
+    "function _writeOptionBool(v) {",
+    "  if (v === null || v === undefined) return 0;",
+    "  const ptr = _exports.__alloc(4);",
+    "  new DataView(_exports.memory.buffer).setInt32(ptr, v ? 1 : 0, true);",
+    "  return ptr;",
+    "}",
+    "function _readOptionBool(ptr) {",
+    "  if (ptr === 0) return null;",
+    "  return new DataView(_exports.memory.buffer).getInt32(ptr, true) !== 0;",
+    "}",
+    "",
+    "function _writeOptionString(v) {",
+    "  if (v === null || v === undefined) return 0;",
+    "  const sptr = _writeString(v);",
+    "  const ptr = _exports.__alloc(4);",
+    "  new DataView(_exports.memory.buffer).setInt32(ptr, sptr, true);",
+    "  return ptr;",
+    "}",
+    "function _readOptionString(ptr) {",
+    "  if (ptr === 0) return null;",
+    "  const sptr = new DataView(_exports.memory.buffer).getInt32(ptr, true);",
+    "  return _readString(sptr);",
+    "}",
+    "",
+    "// --- Result[T, String] marshalling -------------------------------------",
+    "// Almide ABI: ptr → [tag:i32 (0=ok, 1=err)][value]. Value stored at offset 4.",
+    "// JS surface: Ok(v) returns v directly, Err(e) throws new Error(e).",
+    "function _readResultIntString(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  if (view.getInt32(ptr, true) === 0) {",
+    "    return Number(view.getBigInt64(ptr + 4, true));",
+    "  }",
+    "  throw new Error(_readString(view.getInt32(ptr + 4, true)));",
+    "}",
+    "",
+    "function _readResultFloatString(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  if (view.getInt32(ptr, true) === 0) {",
+    "    return view.getFloat64(ptr + 4, true);",
+    "  }",
+    "  throw new Error(_readString(view.getInt32(ptr + 4, true)));",
+    "}",
+    "",
+    "function _readResultBoolString(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  if (view.getInt32(ptr, true) === 0) {",
+    "    return view.getInt32(ptr + 4, true) !== 0;",
+    "  }",
+    "  throw new Error(_readString(view.getInt32(ptr + 4, true)));",
+    "}",
+    "",
+    "function _readResultStringString(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  if (view.getInt32(ptr, true) === 0) {",
+    "    return _readString(view.getInt32(ptr + 4, true));",
+    "  }",
+    "  throw new Error(_readString(view.getInt32(ptr + 4, true)));",
+    "}",
+    "",
+    "function _readResultUnitString(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  if (view.getInt32(ptr, true) === 0) {",
+    "    return undefined;",
+    "  }",
+    "  throw new Error(_readString(view.getInt32(ptr + 4, true)));",
+    "}",
+    "",
   ]
 
   let fn_blocks = supported |> list.flat_map((f) => {
     let name = get_str(f, "name")
     let params = get_arr(f, "params")
-    let ret = json.get(f, "return") ?? json.null()
+    let ret = effective_return(f)
     let js_params = params |> list.map((p) => get_str(p, "name")) |> list.join(", ")
     let wasm_args = params
       |> list.map((p) => to_wasm(get_type(p), get_str(p, "name")))
@@ -165,26 +1129,59 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     ]
   })
 
-  (preamble + fn_blocks) |> list.join("\n")
+  (preamble + matrix_helpers + record_helpers + fn_blocks) |> list.join("\n")
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
   let iface = json.parse(iface_json) ?? json.null()
+  let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
   let supported = fns |> list.filter((f) => is_supported_fn(f))
+
+  // Only emit interfaces for types that are actually referenced by the
+  // user's exported functions. This keeps stdlib records (FileStat,
+  // ProcessStatus, ...) out of the generated .d.ts.
+  let used_direct = supported |> list.flat_map((f) => collect_named_in_fn(f))
+  let used_names = expand_named_deps(used_direct, types)
+  let iface_blocks = types
+    |> list.filter((t) => list.contains(used_names, get_str(t, "name")))
+    |> list.flat_map((t) => {
+      if record_supported(t) then emit_record_interface(t)
+      else if variant_supported(t) then emit_variant_type(t)
+      else []
+    })
+
+  // Matrix: prepend the Matrix interface if any supported fn uses it.
+  let uses_matrix = supported |> list.fold(false, (acc, f) => acc or fn_uses_matrix(f))
+  let matrix_iface_block = if uses_matrix then [
+    "export interface Matrix {",
+    "  rows: number;",
+    "  cols: number;",
+    "  /** Row-major f64 data. Read-side is a zero-copy view over WASM",
+    "   *  memory — call `.slice()` if you need it to survive WASM grow. */",
+    "  data: Float64Array;",
+    "}",
+    "",
+  ] else []
+
   let sigs = supported |> list.map((f) => {
     let name = get_str(f, "name")
     let params = get_arr(f, "params")
-    let ret = json.get(f, "return") ?? json.null()
+    let ret = effective_return(f)
     let params_str = params
       |> list.map((p) => "${get_str(p, "name")}: ${ts_type(get_type(p))}")
       |> list.join(", ")
     "export function ${name}(${params_str}): ${ts_type(ret)};"
   })
-  let header = "// Generated by almide-wasm-bindgen. Do not edit.\n\n" +
-               "export default function init(wasmUrl?: string | URL | Request): Promise<void>;\n"
-  if list.is_empty(sigs) then header + "\n"
-  else header + "\n" + (sigs |> list.join("\n")) + "\n"
+
+  let header_lines = [
+    "// Generated by almide-wasm-bindgen. Do not edit.",
+    "",
+    "export default function init(wasmUrl?: string | URL | Request): Promise<void>;",
+    "",
+  ]
+  let parts = header_lines + matrix_iface_block + iface_blocks + sigs
+  (parts |> list.join("\n")) + "\n"
 }
 
 fn generate_package_json(module_name: String, version: String) -> String = {
@@ -195,7 +1192,8 @@ fn generate_package_json(module_name: String, version: String) -> String = {
   // interpolated literal. Almide codegen currently inlines such literals
   // as real Rust source newlines, which the Rust formatter then re-indents,
   // leaking 4 spaces into the runtime output. See issue log 0007.
-  let v = if version == "" then "0.1.0" else "${version}"
+  // (Bug 1 fixed in almide 0.14.3+: String-typed if branches now auto-coerce)
+  let v = if version == "" then "0.1.0" else version
   [
     "{",
     "  \"name\": \"${module_name}\",",
