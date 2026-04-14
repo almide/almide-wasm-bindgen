@@ -666,7 +666,7 @@ test "to_wasm / from_wasm dispatch matrix" {
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readMatrix(p)")
 }
 
-test "generate_dts emits Matrix interface when a fn uses it" {
+test "generate_dts emits Matrix class when a fn uses it" {
   let iface = "{\"module\":\"m\",\"types\":[]," +
     "\"functions\":[" +
     "{\"name\":\"mat_double\"," +
@@ -674,9 +674,13 @@ test "generate_dts emits Matrix interface when a fn uses it" {
     "\"return\":{\"kind\":\"matrix\"}}" +
     "]}";
   let dts = wasm_bindgen.generate_dts(iface, "m")
-  assert(string.contains(dts, "export interface Matrix {"))
+  assert(string.contains(dts, "export class Matrix {"))
   assert(string.contains(dts, "data: Float64Array"))
-  assert(string.contains(dts, "mat_double(m: Matrix): Matrix"))
+  assert(string.contains(dts, "toFloat64Array(): Float64Array"))
+  assert(string.contains(dts, "export type MatrixInput ="))
+  // Params take MatrixInput (either Matrix handle or plain {rows,cols,data}),
+  // returns are the tight Matrix class.
+  assert(string.contains(dts, "mat_double(m: MatrixInput): Matrix"))
 }
 
 test "generate_dts omits Matrix interface when no fn uses it" {
@@ -690,7 +694,7 @@ test "generate_dts omits Matrix interface when no fn uses it" {
   assert(not string.contains(dts, "export interface Matrix"))
 }
 
-test "generate_esm emits _writeMatrix / _readMatrix with zero-copy view" {
+test "generate_esm emits Matrix handle class + _writeMatrix / _readMatrix" {
   let iface = "{\"module\":\"m\",\"types\":[]," +
     "\"functions\":[" +
     "{\"name\":\"mat_double\"," +
@@ -698,12 +702,22 @@ test "generate_esm emits _writeMatrix / _readMatrix with zero-copy view" {
     "\"return\":{\"kind\":\"matrix\"}}" +
     "]}";
   let esm = wasm_bindgen.generate_esm(iface, "m")
+  // Matrix is a persistent handle class — chained ops pass ptrs around
+  // without round-tripping through Float64Array.
+  assert(string.contains(esm, "export class Matrix"))
   assert(string.contains(esm, "function _writeMatrix"))
   assert(string.contains(esm, "function _readMatrix"))
-  assert(string.contains(esm, "new Float64Array(buf, ptr + 8, rows * cols)"))
-  // Write detaches the input from WASM memory before alloc to survive grow
+  // Fast path: `m instanceof Matrix` reuses the pointer (zero copy).
+  assert(string.contains(esm, "if (m instanceof Matrix) return m._ptr"))
+  // Zero-copy view exposed via `get data()` — built freshly against
+  // _exports.memory.buffer each access so grow-detaches are tolerated.
+  assert(string.contains(esm, "get data()"))
+  assert(string.contains(esm, "new Float64Array(_exports.memory.buffer, this._ptr + 8, this.rows * this.cols)"))
+  // Write still detaches plain-object inputs before alloc (survives grow).
   assert(string.contains(esm, "data.slice()"))
   assert(string.contains(esm, ".set(src)"))
+  // _readMatrix returns a Matrix instance, not a plain object.
+  assert(string.contains(esm, "return new Matrix(ptr, rows, cols)"))
 }
 
 // ═══════════════════════════════════════════════════════

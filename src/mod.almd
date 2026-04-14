@@ -799,17 +799,44 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
   let matrix_helpers = if uses_matrix then [
     "// --- Matrix marshalling (f64, row-major) -----------------------------",
     "// Layout: [rows:i32 LE][cols:i32 LE][data: f64 LE * rows * cols]",
-    "// _readMatrix returns a ZERO-COPY Float64Array view; call .slice() on",
-    "// .data if the matrix must outlive any WASM memory growth.",
+    "//",
+    "// Matrix is a *persistent handle* class: instances hold a raw pointer",
+    "// into WASM linear memory, not a copy. Chained ops (scale → add → ...)",
+    "// pass handles around without re-serialising, so the JS↔WASM boundary",
+    "// cost is paid once on input, once on materialisation — not per-op.",
+    "//",
+    "// Accepts as input EITHER a Matrix instance (zero-copy, fast path) OR a",
+    "// plain `{rows, cols, data}` object (copies into WASM, for user-built",
+    "// inputs from Float64Array / number[]).",
+    "export class Matrix {",
+    "  constructor(ptr, rows, cols) {",
+    "    this._ptr = ptr | 0;",
+    "    this.rows = rows | 0;",
+    "    this.cols = cols | 0;",
+    "  }",
+    "  /** Zero-copy Float64Array view over WASM memory. Invalidated by any",
+    "   *  subsequent alloc that grows memory, or by __heapRestore. For long-",
+    "   *  lived data, call .toFloat64Array() (copy). */",
+    "  get data() {",
+    "    return new Float64Array(_exports.memory.buffer, this._ptr + 8, this.rows * this.cols);",
+    "  }",
+    "  /** Detached copy — safe across grow / restore. */",
+    "  toFloat64Array() { return this.data.slice(); }",
+    "  /** Same shape as the plain-object Matrix for interop: {rows, cols, data}. */",
+    "  toJSON() { return { rows: this.rows, cols: this.cols, data: this.toFloat64Array() }; }",
+    "}",
+    "",
     "function _writeMatrix(m) {",
+    "  // Fast path: Matrix handle already lives in WASM memory. Reuse its ptr.",
+    "  if (m instanceof Matrix) return m._ptr;",
     "  const rows = m.rows | 0;",
     "  const cols = m.cols | 0;",
     "  const n = rows * cols;",
     "  // Detach the input from WASM memory BEFORE the alloc. If the caller",
-    "  // passed in `prevResult.data` (which is a zero-copy view over WASM",
-    "  // linear memory), the upcoming __alloc may grow memory and detach",
-    "  // that view — leaving us with no way to read the source. Float64Array",
-    "  // .slice() always returns a fresh standalone TypedArray.",
+    "  // passed in a Float64Array view over WASM linear memory, the upcoming",
+    "  // __alloc may grow memory and detach that view — leaving us with no",
+    "  // way to read the source. Float64Array.slice() always returns a fresh",
+    "  // standalone TypedArray.",
     "  const data = m.data;",
     "  const src = (data instanceof Float64Array)",
     "    ? data.slice()",
@@ -824,12 +851,10 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "}",
     "",
     "function _readMatrix(ptr) {",
-    "  const buf = _exports.memory.buffer;",
-    "  const view = new DataView(buf);",
+    "  const view = new DataView(_exports.memory.buffer);",
     "  const rows = view.getInt32(ptr, true);",
     "  const cols = view.getInt32(ptr + 4, true);",
-    "  const data = new Float64Array(buf, ptr + 8, rows * cols);",
-    "  return { rows, cols, data };",
+    "  return new Matrix(ptr, rows, cols);",
     "}",
     "",
   ] else []
@@ -1273,16 +1298,33 @@ fn generate_dts(iface_json: String, module_name: String) -> String = {
       else []
     })
 
-  // Matrix: prepend the Matrix interface if any supported fn uses it.
+  // Matrix: prepend the Matrix handle class if any supported fn uses it.
   let uses_matrix = supported |> list.fold(false, (acc, f) => acc or fn_uses_matrix(f))
   let matrix_iface_block = if uses_matrix then [
-    "export interface Matrix {",
-    "  rows: number;",
-    "  cols: number;",
-    "  /** Row-major f64 data. Read-side is a zero-copy view over WASM",
-    "   *  memory — call `.slice()` if you need it to survive WASM grow. */",
-    "  data: Float64Array;",
+    "/** Persistent handle into WASM memory for a row-major f64 matrix.",
+    " *",
+    " *  Chainable: values returned by matrix-producing fns are Matrix instances,",
+    " *  and passing a Matrix back into another fn reuses the ptr (zero copy).",
+    " *  Input fns also accept plain `{rows, cols, data}` (data: Float64Array",
+    " *  | number[]) for one-shot user-built matrices.",
+    " */",
+    "export class Matrix {",
+    "  readonly _ptr: number;",
+    "  readonly rows: number;",
+    "  readonly cols: number;",
+    "  constructor(ptr: number, rows: number, cols: number);",
+    "  /** Zero-copy Float64Array view over WASM memory. Invalidated by any",
+    "   *  subsequent alloc that grows memory, or by __heapRestore. */",
+    "  readonly data: Float64Array;",
+    "  /** Detached copy — safe across grow / restore. */",
+    "  toFloat64Array(): Float64Array;",
+    "  /** Plain-object interop: {rows, cols, data: Float64Array}. */",
+    "  toJSON(): { rows: number; cols: number; data: Float64Array };",
     "}",
+    "",
+    "/** Input shape for Matrix-accepting fns (either a Matrix handle or a",
+    " *  plain object with raw data). */",
+    "export type MatrixInput = Matrix | { rows: number; cols: number; data: Float64Array | number[] };",
     "",
   ] else []
 
@@ -1290,8 +1332,15 @@ fn generate_dts(iface_json: String, module_name: String) -> String = {
     let name = get_str(f, "name")
     let params = get_arr(f, "params")
     let ret = effective_return(f)
+    // Params accept MatrixInput (Matrix | {rows,cols,data}); returns use
+    // the tight Matrix class. Done by a light string substitution so every
+    // other ts_type mapping stays identical in both positions.
+    let param_ty = (p: Value) => {
+      let base = ts_type(get_type(p))
+      if base == "Matrix" then "MatrixInput" else base
+    }
     let params_str = params
-      |> list.map((p) => "${get_str(p, "name")}: ${ts_type(get_type(p))}")
+      |> list.map((p) => "${get_str(p, "name")}: ${param_ty(p)}")
       |> list.join(", ")
     let almide_sig = almide_fn_signature(f)
     let is_effect = json.as_bool(json.get(f, "effect") ?? json.from_bool(false)) ?? false
