@@ -747,6 +747,37 @@ test "generate_esm emits _writeTuple_/_readTuple_ helpers per signature" {
   assert(string.contains(esm, "_readTuple_SI(_exports.swap"))
 }
 
+test "generate_esm emits _writeBytes / _readBytes when any fn uses Bytes" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"double_each\"," +
+    "\"params\":[{\"name\":\"b\",\"type\":{\"kind\":\"bytes\"}}]," +
+    "\"return\":{\"kind\":\"bytes\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  assert(string.contains(esm, "function _writeBytes("))
+  assert(string.contains(esm, "function _readBytes("))
+  // Fast path: Uint8Array copied straight into WASM memory
+  assert(string.contains(esm, "(arr instanceof Uint8Array) ? arr : Uint8Array.from(arr)"))
+  assert(string.contains(esm, "new Uint8Array(_exports.memory.buffer, ptr + 4, n).set(src)"))
+  // Read returns a detached copy so it survives WASM grow
+  assert(string.contains(esm, ".slice()"))
+  // Call site
+  assert(string.contains(esm, "_writeBytes(b)"))
+  assert(string.contains(esm, "_readBytes(_exports.double_each"))
+}
+
+test "generate_dts emits Uint8Array for Bytes" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"f\"," +
+    "\"params\":[{\"name\":\"b\",\"type\":{\"kind\":\"bytes\"}}]," +
+    "\"return\":{\"kind\":\"bytes\"}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  assert(string.contains(dts, "f(b: Uint8Array): Uint8Array"))
+}
+
 test "generate_esm emits _writeMap_ / _readMap_ helpers per signature" {
   // fn lookup(m: Map[String, Int], k: String) -> Int
   let iface = "{\"module\":\"m\",\"types\":[]," +
