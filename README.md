@@ -52,7 +52,11 @@ Then `cd dist && npm publish` works.
 | `effect fn`       | implicit `Result[T, error]` at ABI       | auto-unwrapped (throw on Err)    | `T`                      |
 | `Record`          | inline fields, sequential WASM offsets    | plain `{ field: value }` object  | `interface`              |
 | `Variant`         | `[tag:i32][payload...]`, max-case alloc  | `{ tag: 'Case', _0, _1, ... }`   | discriminated union      |
-| `Matrix`          | `[rows:i32][cols:i32][f64 × rows×cols]`  | `{ rows, cols, data: Float64Array }` (zero-copy view) | `Matrix` interface |
+| `Tuple[T1, T2, ...]` | packed sequential elements             | `[v1, v2, ...]`                  | `[T1, T2, ...]`          |
+| `Matrix`          | `[rows:i32][cols:i32][f64 × rows×cols]`  | `Matrix` class (handle, zero-copy `.data` getter, chain-friendly) | `class Matrix` |
+| `Bytes`           | `[len:i32][u8 × len]`                    | `Uint8Array` (detached copy on read) | `Uint8Array`         |
+| `Map[K, V]`       | `[len:i32][k][v][k][v]...` packed pairs  | `Map<K, V>` (in either direction) | `Map<K, V>`             |
+| `Set[T]`          | `[len:i32][e][e]...` like List           | `Set<T>` (in either direction)   | `Set<T>`                 |
 
 Memory-grow safety: each marshaller fetches `_exports.memory.buffer` fresh at call time, so `__alloc`-induced growth doesn't invalidate pointers. Pointer-typed fields are pre-written before the outer `__alloc`.
 
@@ -91,7 +95,7 @@ almide run almide-lander/src/main.almd -- \
 
 ## Status
 
-**v0.1** — production-usable for almost everything in `JS_TS_FRIENDLY_VISION.md`.
+**v0.2** — production-usable, full P1 + most P2 of `JS_TS_FRIENDLY_VISION.md` cleared.
 
 | Capability                                         | Status |
 |----------------------------------------------------|--------|
@@ -104,24 +108,49 @@ almide run almide-lander/src/main.almd -- \
 | `effect fn` (auto-wrap as Result at ABI)           | ✅     |
 | Record (with primitive / String / nested fields)   | ✅     |
 | Variant → TS discriminated union                   | ✅     |
-| Matrix → `{rows, cols, data: Float64Array}` zero-copy view | ✅     |
+| **Tuple → TS positional `[T1, T2, ...]`**          | ✅ iter 51 |
+| **Map[K, V] → `Map<K, V>` (incl. nested values)**   | ✅ iter 52 + 56 + 57 |
+| **Set[T] → `Set<T>` (incl. Named / Bytes element)** | ✅ iter 52 + 56 + 57 |
+| **Bytes → `Uint8Array`**                            | ✅ iter 53 |
+| Matrix → persistent handle class, chain-friendly    | ✅ iter 48 |
+| **JS imports via `@extern(wasm, "js", ...)` + auto shim** | ✅ iter 47 |
 | TS interfaces / types auto-generated               | ✅     |
 | `.d.ts` filtering (no stdlib type leak)            | ✅     |
+| JSDoc with Almide signature + `@throws` hint       | ✅     |
 | npm `package.json` + publish workflow              | ✅     |
+| `wasm-opt -O3` post-process (lander default-on)    | ✅ iter 45 + 46 |
 | Minimal WASI shim (`fd_write` → console)           | ✅     |
 | Browser fetch path                                 | ✅     |
 | WIT generation (Component Model on-ramp)           | ✅     |
-| `@import_js("fetch")` / arbitrary JS imports       | ❌ (Almide compiler) |
-| `--target component` real Component Model output    | ❌ (Almide compiler) |
+| Multi-host (Node / Bun / Deno / wasmtime / Python) | ✅ iter 50 (6 / 7 runtimes verified) |
+| `--target component` real Component Model output    | ❌ (Almide compiler — 3 ABI gaps) |
 | Closure (function-typed fields/args)               | ❌     |
 
-## Performance vs. pure JS / Rust+wasm-bindgen
+## Performance vs. Rust+wasm-bindgen
 
-(Measured on M-series Mac, Node 22, see `examples/bench/`.)
+Fresh comparison (Node 22 on M-series Mac, both sides built with `wasm-opt -O3`,
+Almide 0.14.2 / wasm-bindgen 0.2):
 
-- **matmul 256×256**: 4.81× faster than pure-JS, **2.04× faster than naive Rust+wasm-bindgen**
-- **elementwise chain (scale+scale+add)**: pure-JS is 7× faster than Almide today (fusion pass未実装が原因 — Almide本体側のタスク)
-- **wasm binary size**: Almide modules ~3-4KB vs Rust+wasm-bindgen ~12-13KB (**3.7× smaller**)
+| Workload                  | Almide | Rust+wasm-bindgen | Result                  |
+|---------------------------|-------:|------------------:|-------------------------|
+| matmul 256×256            | 4.62 ms | 8.48 ms          | **Almide 1.84× faster** |
+| matmul 128×128            | 0.72 ms | 1.04 ms          | **Almide 1.45× faster** |
+| axpy (a*ka + b*kb), N=512 | 0.38 ms | 0.36 ms          | Rust 1.05× narrow       |
+| compose (3-term), N=512   | 0.58 ms | 0.44 ms          | Rust 1.31×              |
+| **wasm binary size**      | **1490 B** | 11225 B       | **Almide 7.53× smaller** |
+
+Notes:
+
+- **Matrix as persistent handle** (iter 48): chained ops (`scale → add → sub …`)
+  pass pointers, not data — boundary cost dropped 13×, putting elementwise chains
+  in the same league as Rust (was 7× loss in iter 27).
+- **Tree-fuse `fma3`** (iter 55): Almide collapses nested `add(scale, sub(neg, scale))`
+  into a single 3-term SIMD pass — same memory traffic as Rust's hand-written
+  `compose` loop.
+- **Size**: Almide's pure-Rust compiler emits much tighter WASM than `rustc → wasm-bindgen`
+  even with `wasm-opt -O3 lto=true` on both sides.
+
+See [`_progress/0058-rust-comparison-rerun.md`](https://github.com/almide/almide-js/blob/main/_progress/0058-rust-comparison-rerun.md) for the full benchmark + setup.
 
 ## Examples
 
