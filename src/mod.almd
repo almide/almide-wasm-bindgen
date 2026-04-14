@@ -498,6 +498,29 @@ fn ty_uses_matrix(ty: Value) -> Bool = match get_kind(ty) {
     let err_ty = json.get(ty, "err") ?? json.null()
     ty_uses_matrix(ok_ty) or ty_uses_matrix(err_ty)
   },
+  "map" => ty_uses_matrix(json.get(ty, "value") ?? json.null()),
+  "set" => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
+  "tuple" => {
+    let elems = get_arr(ty, "elements")
+    elems |> list.fold(false, (acc, e) => acc or ty_uses_matrix(e))
+  },
+  _        => false,
+}
+
+// Does Bytes appear anywhere in the type tree? Used to decide whether the
+// fixed _writeBytes/_readBytes helper pair needs emitting.
+fn bytes_appears_in(ty: Value) -> Bool = match get_kind(ty) {
+  "bytes"  => true,
+  "list"   => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
+  "option" => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
+  "result" => bytes_appears_in(json.get(ty, "ok") ?? json.null())
+              or bytes_appears_in(json.get(ty, "err") ?? json.null()),
+  "map"    => bytes_appears_in(json.get(ty, "value") ?? json.null()),
+  "set"    => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
+  "tuple"  => {
+    let elems = get_arr(ty, "elements")
+    elems |> list.fold(false, (acc, e) => acc or bytes_appears_in(e))
+  },
   _        => false,
 }
 
@@ -1216,10 +1239,11 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
   // Bytes helpers — fixed shape (Uint8Array), emit once when referenced.
   // Layout matches emit_wasm/calls_bytes.rs: [len:i32][data:u8...], identical
   // to String but opaque (no UTF-8 decode, raw bytes).
+  let ty_uses_bytes = (ty: Value) => bytes_appears_in(ty)
   let fn_uses_bytes = (f: Value) => {
     let params = get_arr(f, "params")
-    let any_p = params |> list.fold(false, (acc, p) => acc or get_kind(get_type(p)) == "bytes")
-    any_p or get_kind(effective_return(f)) == "bytes"
+    let any_p = params |> list.fold(false, (acc, p) => acc or ty_uses_bytes(get_type(p)))
+    any_p or ty_uses_bytes(effective_return(f))
   }
   let uses_bytes = supported |> list.fold(false, (acc, f) => acc or fn_uses_bytes(f))
   let bytes_helpers = if uses_bytes then [
