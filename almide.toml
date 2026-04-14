@@ -1,3 +1,4 @@
 [package]
 name = "wasm_bindgen"
 version = "0.1.0"
+description = "WebAssembly + JS/TS binding generator for Almide"

@@ -24,6 +24,35 @@ fn get_kind(v: Value) -> String = get_str(v, "kind")
 
 fn get_type(v: Value) -> Value = json.get(v, "type") ?? json.null()
 
+// Render an Almide-style type expression (uses Capitalized names like
+// `Int`, `List[Int]`, `Option[String]`, `Result[T, E]`, `Matrix`, named).
+fn almide_type_str(ty: Value) -> String = match get_kind(ty) {
+  "int"    => "Int",
+  "float"  => "Float",
+  "bool"   => "Bool",
+  "string" => "String",
+  "unit"   => "()",
+  "matrix" => "Matrix",
+  "list"   => "List[${almide_type_str(json.get(ty, "inner") ?? json.null())}]",
+  "option" => "Option[${almide_type_str(json.get(ty, "inner") ?? json.null())}]",
+  "result" => "Result[${almide_type_str(json.get(ty, "ok") ?? json.null())}, ${almide_type_str(json.get(ty, "err") ?? json.null())}]",
+  "named"  => get_str(ty, "name"),
+  _        => "Unknown",
+}
+
+// Render the Almide-style fn signature shown in JSDoc hover.
+fn almide_fn_signature(fn_val: Value) -> String = {
+  let name = get_str(fn_val, "name")
+  let params = get_arr(fn_val, "params")
+  let is_effect = json.as_bool(json.get(fn_val, "effect") ?? json.from_bool(false)) ?? false
+  let kw = if is_effect then "effect fn" else "fn"
+  let params_str = params
+    |> list.map((p) => "${get_str(p, "name")}: ${almide_type_str(get_type(p))}")
+    |> list.join(", ")
+  let ret_str = almide_type_str(json.get(fn_val, "return") ?? json.null())
+  "${kw} ${name}(${params_str}) -> ${ret_str}"
+}
+
 // Returns the effective return type used for JS-side marshalling.
 //   - pure fn: just `return`
 //   - effect fn: synthesizes `{kind: "result", ok: <return>, err: <error>}`
@@ -623,7 +652,7 @@ fn emit_record_interface(type_def: Value) -> List[String] = {
 
 // ── Public API (stubs — full impl in subsequent iterations) ──
 
-fn version() -> String = "0.0.1"
+fn version() -> String = "0.1.0"
 
 // ── WIT (WebAssembly Interface Type) generation ──
 //
@@ -1167,14 +1196,23 @@ fn generate_dts(iface_json: String, module_name: String) -> String = {
     "",
   ] else []
 
-  let sigs = supported |> list.map((f) => {
+  let sigs = supported |> list.flat_map((f) => {
     let name = get_str(f, "name")
     let params = get_arr(f, "params")
     let ret = effective_return(f)
     let params_str = params
       |> list.map((p) => "${get_str(p, "name")}: ${ts_type(get_type(p))}")
       |> list.join(", ")
-    "export function ${name}(${params_str}): ${ts_type(ret)};"
+    let almide_sig = almide_fn_signature(f)
+    let is_effect = json.as_bool(json.get(f, "effect") ?? json.from_bool(false)) ?? false
+    let throws_line = if is_effect then [" * @throws if the effect fn returned an error (Result.Err)."] else []
+    let jsdoc = [
+      "/**",
+      " * Almide signature: `${almide_sig}`",
+    ] + throws_line + [
+      " */",
+    ]
+    jsdoc + ["export function ${name}(${params_str}): ${ts_type(ret)};"]
   })
 
   let header_lines = [
