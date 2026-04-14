@@ -117,11 +117,13 @@ fn map_key_supported(k: Value) -> Bool = match get_kind(k) {
 
 // Map values can be any supported type whose WASM slot is either an inline
 // primitive (8-byte Int / 8-byte Float / 4-byte Bool) or a 4-byte pointer
-// (String / Named / List / Option). Compound inner types delegate to
-// is_supported_ty for recursive validation.
+// (String / Named / List / Option / Matrix / Bytes). Compound inner types
+// delegate to is_supported_ty for recursive validation.
 fn map_value_supported(v: Value) -> Bool = match get_kind(v) {
   "int" => true, "float" => true, "bool" => true, "string" => true,
   "named"  => true,
+  "matrix" => true,
+  "bytes"  => true,
   "list"   => is_supported_ty(v),
   "option" => is_supported_ty(v),
   _ => false,
@@ -130,6 +132,7 @@ fn map_value_supported(v: Value) -> Bool = match get_kind(v) {
 fn set_inner_supported(e: Value) -> Bool = match get_kind(e) {
   "int" => true, "float" => true, "bool" => true, "string" => true,
   "named"  => true,
+  "bytes"  => true,
   _ => false,
 }
 
@@ -159,7 +162,7 @@ fn tuple_supported(ty: Value) -> Bool = {
   let elems = get_arr(ty, "elements")
   elems |> list.fold(true, (acc, e) => acc and match get_kind(e) {
     "int" => true, "float" => true, "bool" => true, "string" => true,
-    "named" => true, "matrix" => true,
+    "named" => true, "matrix" => true, "bytes" => true,
     _ => false,
   })
 }
