@@ -96,7 +96,34 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
   // when we walk iface.types[] and skip records with unsupported fields.
   "named"  => true,
   "matrix" => true,
+  "tuple"  => tuple_supported(ty),
   _        => false,
+}
+
+// Tuple with primitive / string / named elements. Nested tuple/list/option
+// deferred to a later iter.
+fn tuple_supported(ty: Value) -> Bool = {
+  let elems = get_arr(ty, "elements")
+  elems |> list.fold(true, (acc, e) => acc and match get_kind(e) {
+    "int" => true, "float" => true, "bool" => true, "string" => true,
+    "named" => true, "matrix" => true,
+    _ => false,
+  })
+}
+
+// Deterministic signature for a tuple type, used to name emitted helpers
+// (one _writeTuple_<sig> / _readTuple_<sig> per unique element list).
+fn tuple_sig(ty: Value) -> String = {
+  let elems = get_arr(ty, "elements")
+  elems |> list.map((e) => match get_kind(e) {
+    "int"    => "I",
+    "float"  => "F",
+    "bool"   => "B",
+    "string" => "S",
+    "matrix" => "M",
+    "named"  => "N${get_str(e, "name")}",
+    _        => "X",
+  }) |> list.join("")
 }
 
 // Inline-value fields (stored by direct load/store in the record body).
@@ -198,6 +225,12 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
   // Matrix is always f64 at the WASM ABI level; JS surface is a named
   // `Matrix` interface that wraps Float64Array data (zero-copy).
   "matrix" => "Matrix",
+  // Tuples map to TS tuple literals: `[T1, T2, T3]`. Always bracketed.
+  "tuple" => {
+    let elems = get_arr(ty, "elements")
+    let parts = elems |> list.map((e) => ts_type(e)) |> list.join(", ")
+    "[${parts}]"
+  },
   _        => "unknown",
 }
 
@@ -215,6 +248,7 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "option" => option_to_wasm(json.get(ty, "inner") ?? json.null(), expr),
   "named"  => "_write${get_str(ty, "name")}(${expr})",
   "matrix" => "_writeMatrix(${expr})",
+  "tuple"  => "_writeTuple_${tuple_sig(ty)}(${expr})",
   _        => expr,
 }
 
@@ -233,6 +267,7 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   ),
   "named"  => "_read${get_str(ty, "name")}(${expr})",
   "matrix" => "_readMatrix(${expr})",
+  "tuple"  => "_readTuple_${tuple_sig(ty)}(${expr})",
   _        => expr,
 }
 
@@ -347,7 +382,33 @@ fn collect_named_in_ty(ty: Value) -> List[String] = match get_kind(ty) {
     let err_names = collect_named_in_ty(json.get(ty, "err") ?? json.null())
     ok_names + err_names
   },
+  "tuple" => {
+    let elems = get_arr(ty, "elements")
+    elems |> list.flat_map((e) => collect_named_in_ty(e))
+  },
   _        => [],
+}
+
+// Walk a function's param + return types and collect every tuple type that
+// appears. The tuples are returned as-is (Value) so emit_tuple_helpers can
+// read `elements`. Dedup by `tuple_sig` at the caller.
+fn collect_tuples_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
+  "tuple"  => [ty],
+  "list"   => collect_tuples_in_ty(json.get(ty, "inner") ?? json.null()),
+  "option" => collect_tuples_in_ty(json.get(ty, "inner") ?? json.null()),
+  "result" => {
+    let ok_ts = collect_tuples_in_ty(json.get(ty, "ok") ?? json.null())
+    let err_ts = collect_tuples_in_ty(json.get(ty, "err") ?? json.null())
+    ok_ts + err_ts
+  },
+  _ => [],
+}
+
+fn collect_tuples_in_fn(fn_val: Value) -> List[Value] = {
+  let params = get_arr(fn_val, "params")
+  let param_tuples = params |> list.flat_map((p) => collect_tuples_in_ty(get_type(p)))
+  let ret_tuples = collect_tuples_in_ty(effective_return(fn_val))
+  param_tuples + ret_tuples
 }
 
 // Does this type use `Matrix`? Walks compound types recursively.
@@ -639,6 +700,79 @@ fn emit_record_helpers(type_def: Value) -> List[String] = {
   write_block + read_block
 }
 
+// Emit _writeTuple_<sig> / _readTuple_<sig> helpers for a tuple type.
+// Layout (matches emit_wasm/collections.rs): elements packed sequentially,
+// offset[i] = sum of wasm_byte_size(elements[0..i]).
+fn emit_tuple_helpers(ty: Value) -> List[String] = {
+  let sig = tuple_sig(ty)
+  let elems = get_arr(ty, "elements")
+  let size = int.to_string(elems |> list.fold(0, (acc, e) => acc + wasm_byte_size(e)))
+  let offsets = {
+    let (acc, _) = elems |> list.fold(([], 0), (state, e) => {
+      let (os, off) = state
+      (os + [off], off + wasm_byte_size(e))
+    })
+    acc
+  }
+
+  // Pre-compute ptr-shaped element marshalling before outer __alloc to
+  // avoid growth mid-write invalidating views.
+  let pre_lines = elems |> list.enumerate |> list.flat_map((entry) => {
+    let (i, e) = entry
+    let is_inline = match get_kind(e) {
+      "int" => true, "float" => true, "bool" => true, _ => false
+    }
+    if is_inline then []
+    else ["  const _t${int.to_string(i)} = ${to_wasm(e, "arr[${int.to_string(i)}]")};"]
+  })
+
+  let store_lines = elems |> list.enumerate |> list.map((entry) => {
+    let (i, e) = entry
+    let off = int.to_string(list.get(offsets, i) ?? 0)
+    let idx = int.to_string(i)
+    match get_kind(e) {
+      "int"   => "  view.setBigInt64(ptr + ${off}, BigInt(arr[${idx}]), true);",
+      "float" => "  view.setFloat64(ptr + ${off}, arr[${idx}], true);",
+      "bool"  => "  view.setInt32(ptr + ${off}, arr[${idx}] ? 1 : 0, true);",
+      _       => "  view.setInt32(ptr + ${off}, _t${idx}, true);",
+    }
+  })
+
+  let read_lines = elems |> list.enumerate |> list.map((entry) => {
+    let (i, e) = entry
+    let off = int.to_string(list.get(offsets, i) ?? 0)
+    match get_kind(e) {
+      "int"   => "    Number(view.getBigInt64(ptr + ${off}, true)),",
+      "float" => "    view.getFloat64(ptr + ${off}, true),",
+      "bool"  => "    view.getInt32(ptr + ${off}, true) !== 0,",
+      _       => "    ${from_wasm(e, "view.getInt32(ptr + ${off}, true)")},",
+    }
+  })
+
+  let write_block = [
+    "function _writeTuple_${sig}(arr) {",
+  ] + pre_lines + [
+    "  const ptr = _exports.__alloc(${size});",
+    "  const view = new DataView(_exports.memory.buffer);",
+  ] + store_lines + [
+    "  return ptr;",
+    "}",
+    "",
+  ]
+
+  let read_block = [
+    "function _readTuple_${sig}(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  return [",
+  ] + read_lines + [
+    "  ];",
+    "}",
+    "",
+  ]
+
+  write_block + read_block
+}
+
 // Emit a TS interface declaration for a record type.
 fn emit_record_interface(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
@@ -793,6 +927,19 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
       else if variant_supported(t) then emit_variant_helpers(t)
       else []
     })
+
+  // Tuple helpers: one _writeTuple_<sig> / _readTuple_<sig> per distinct
+  // tuple shape referenced by any supported fn.
+  let all_tuples = supported |> list.flat_map((f) => collect_tuples_in_fn(f))
+  let tuple_helpers = {
+    let (acc, _) = all_tuples |> list.fold(([], []), (state, ty) => {
+      let (lines, seen) = state
+      let sig = tuple_sig(ty)
+      if list.contains(seen, sig) then (lines, seen)
+      else (lines + emit_tuple_helpers(ty), seen + [sig])
+    })
+    acc
+  }
 
   // Matrix helpers — emit only when any supported fn uses Matrix.
   let uses_matrix = supported |> list.fold(false, (acc, f) => acc or fn_uses_matrix(f))
@@ -1276,7 +1423,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "",
   ] else []
 
-  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + fn_blocks) |> list.join("\n")
+  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + tuple_helpers + fn_blocks) |> list.join("\n")
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
