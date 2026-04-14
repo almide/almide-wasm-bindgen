@@ -790,14 +790,14 @@ test "generate_esm emits _writeMap_ / _readMap_ helpers per signature" {
     "\"return\":{\"kind\":\"int\"}}" +
     "]}";
   let esm = wasm_bindgen.generate_esm(iface, "m")
-  assert(string.contains(esm, "function _writeMap_SI("))
-  assert(string.contains(esm, "function _readMap_SI("))
+  assert(string.contains(esm, "function _writeMap_S_I("))
+  assert(string.contains(esm, "function _readMap_S_I("))
   // Accepts Map<K,V> or iterable of [k,v]
   assert(string.contains(esm, "(m instanceof Map) ? Array.from(m.entries())"))
   // Readback builds a real JS Map
   assert(string.contains(esm, "const out = new Map();"))
   // Call site uses sig
-  assert(string.contains(esm, "_writeMap_SI(m)"))
+  assert(string.contains(esm, "_writeMap_S_I(m)"))
 }
 
 test "generate_esm emits _writeSet_ / _readSet_ helpers per signature" {

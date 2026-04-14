@@ -115,24 +115,43 @@ fn map_key_supported(k: Value) -> Bool = match get_kind(k) {
   _ => false,
 }
 
+// Map values can be any supported type whose WASM slot is either an inline
+// primitive (8-byte Int / 8-byte Float / 4-byte Bool) or a 4-byte pointer
+// (String / Named / List / Option). Compound inner types delegate to
+// is_supported_ty for recursive validation.
 fn map_value_supported(v: Value) -> Bool = match get_kind(v) {
   "int" => true, "float" => true, "bool" => true, "string" => true,
+  "named"  => true,
+  "list"   => is_supported_ty(v),
+  "option" => is_supported_ty(v),
   _ => false,
 }
 
 fn set_inner_supported(e: Value) -> Bool = match get_kind(e) {
   "int" => true, "float" => true, "bool" => true, "string" => true,
+  "named"  => true,
   _ => false,
 }
 
-// Signature char per primitive type (used in tuple/map/set helper names).
-fn prim_sig(ty: Value) -> String = match get_kind(ty) {
+// Signature per type (used in tuple/map/set helper names). Encodes nested
+// compound types so `Map[String, List[Int]]` and `Map[String, List[Float]]`
+// get distinct helpers (`_writeMap_S_LI` vs `_writeMap_S_LF`).
+fn type_sig(ty: Value) -> String = match get_kind(ty) {
   "int"    => "I",
   "float"  => "F",
   "bool"   => "B",
   "string" => "S",
+  "named"  => "N${get_str(ty, "name")}",
+  "list"   => "L${type_sig(json.get(ty, "inner") ?? json.null())}",
+  "option" => "O${type_sig(json.get(ty, "inner") ?? json.null())}",
+  "matrix" => "M",
+  "bytes"  => "Y",
   _        => "X",
 }
+
+// Legacy alias — kept for the tuple helper (which only takes primitive / named
+// elements). Deprecated in favor of type_sig.
+fn prim_sig(ty: Value) -> String = type_sig(ty)
 
 // Tuple with primitive / string / named elements. Nested tuple/list/option
 // deferred to a later iter.
@@ -293,9 +312,9 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "map"    => {
     let k = json.get(ty, "key") ?? json.null()
     let v = json.get(ty, "value") ?? json.null()
-    "_writeMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
+    "_writeMap_${type_sig(k)}_${type_sig(v)}(${expr})"
   },
-  "set"    => "_writeSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "set"    => "_writeSet_${type_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
   "bytes"  => "_writeBytes(${expr})",
   _        => expr,
 }
@@ -319,9 +338,9 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "map"    => {
     let k = json.get(ty, "key") ?? json.null()
     let v = json.get(ty, "value") ?? json.null()
-    "_readMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
+    "_readMap_${type_sig(k)}_${type_sig(v)}(${expr})"
   },
-  "set"    => "_readSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "set"    => "_readSet_${type_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
   "bytes"  => "_readBytes(${expr})",
   _        => expr,
 }
@@ -836,6 +855,32 @@ fn emit_tuple_helpers(ty: Value) -> List[String] = {
 // with type-aware equality (i64_eq, i32_eq, string.eq), so the byte layout
 // produced here must match what the runtime expects slot-for-slot.
 
+// Is this type inline (stored directly in the slot) or pointer-shaped
+// (4-byte i32 ptr into a separately-allocated payload)?
+fn slot_is_inline(ty: Value) -> Bool = match get_kind(ty) {
+  "int" => true, "float" => true, "bool" => true,
+  _ => false,
+}
+
+// Write a single slot at the given address. For inline types emit direct
+// store; for pointer-shaped types expect the caller to pre-compute the ptr
+// in `src` (which is an expression evaluating to an i32 ptr).
+fn slot_write_line(ty: Value, dst_off: String, src: String) -> String = match get_kind(ty) {
+  "int"    => "view.setBigInt64(${dst_off}, BigInt(${src}), true);",
+  "float"  => "view.setFloat64(${dst_off}, ${src}, true);",
+  "bool"   => "view.setInt32(${dst_off}, ${src} ? 1 : 0, true);",
+  _        => "view.setInt32(${dst_off}, ${src}, true);",
+}
+
+fn slot_read_line(ty: Value, src_off: String) -> String = match get_kind(ty) {
+  "int"    => "Number(view.getBigInt64(${src_off}, true))",
+  "float"  => "view.getFloat64(${src_off}, true)",
+  "bool"   => "view.getInt32(${src_off}, true) !== 0",
+  _        => from_wasm(ty, "view.getInt32(${src_off}, true)"),
+}
+
+// Legacy aliases kept for tuple emit (which only marshalls primitive / string
+// slots directly without the pre-write pointer phase).
 fn prim_write_line(ty: Value, dst_off: String, src: String) -> String = match get_kind(ty) {
   "int"    => "view.setBigInt64(${dst_off}, BigInt(${src}), true);",
   "float"  => "view.setFloat64(${dst_off}, ${src}, true);",
@@ -852,30 +897,51 @@ fn prim_read_line(ty: Value, src_off: String) -> String = match get_kind(ty) {
   _        => "undefined /* unsupported prim read: ${get_kind(ty)} */",
 }
 
+// Emit map helpers, supporting inline primitive values AND pointer-shaped
+// values (String / Named / List / Option / Matrix). Pointer-shaped values
+// are written in a pre-allocation phase so their nested writes cannot detach
+// the outer DataView via WASM memory grow.
 fn emit_map_helpers(ty: Value) -> List[String] = {
   let k = json.get(ty, "key") ?? json.null()
   let v = json.get(ty, "value") ?? json.null()
-  let sig = "${prim_sig(k)}${prim_sig(v)}"
+  let sig = "${type_sig(k)}_${type_sig(v)}"
   let k_size = wasm_byte_size(k)
   let v_size = wasm_byte_size(v)
   let pair_size = k_size + v_size
   let k_off = "base"
   let v_off = "base + ${int.to_string(k_size)}"
-  let write_k = prim_write_line(k, k_off, "key")
-  let write_v = prim_write_line(v, v_off, "val")
-  let read_k  = prim_read_line(k, k_off)
-  let read_v  = prim_read_line(v, v_off)
+
+  // Key pre-write: String keys need _writeString before the outer alloc.
+  let key_pre_expr = match get_kind(k) {
+    "string" => "_writeString(entries[i][0])",
+    _        => "entries[i][0]",
+  }
+  let val_pre_expr = if slot_is_inline(v) then "entries[i][1]"
+                     else to_wasm(v, "entries[i][1]")
+
+  let write_k = slot_write_line(k, k_off, "_ks[i]")
+  let write_v = slot_write_line(v, v_off, "_vs[i]")
+  let read_k  = slot_read_line(k, k_off)
+  let read_v  = slot_read_line(v, v_off)
+
   [
     "function _writeMap_${sig}(m) {",
-    "  // Accepts Map<K,V> or iterable of [k,v] pairs.",
     "  const entries = (m instanceof Map) ? Array.from(m.entries()) : Array.from(m);",
     "  const n = entries.length;",
+    "  // Pre-compute all pointer-shaped slots BEFORE the outer alloc. Any alloc",
+    "  // done by a nested write (e.g. _writeString) may grow WASM memory and",
+    "  // detach previously-taken DataViews — safest to finish all sub-writes first.",
+    "  const _ks = new Array(n);",
+    "  const _vs = new Array(n);",
+    "  for (let i = 0; i < n; i++) {",
+    "    _ks[i] = ${key_pre_expr};",
+    "    _vs[i] = ${val_pre_expr};",
+    "  }",
     "  const pair = ${int.to_string(pair_size)};",
     "  const ptr = _exports.__alloc(4 + n * pair);",
     "  const view = new DataView(_exports.memory.buffer);",
     "  view.setInt32(ptr, n, true);",
     "  for (let i = 0; i < n; i++) {",
-    "    const [key, val] = entries[i];",
     "    const base = ptr + 4 + i * pair;",
     "    ${write_k}",
     "    ${write_v}",
@@ -900,15 +966,21 @@ fn emit_map_helpers(ty: Value) -> List[String] = {
 
 fn emit_set_helpers(ty: Value) -> List[String] = {
   let e = json.get(ty, "inner") ?? json.null()
-  let sig = prim_sig(e)
+  let sig = type_sig(e)
   let e_size = wasm_byte_size(e)
-  let write_e = prim_write_line(e, "ptr + 4 + i * elem", "elems[i]")
-  let read_e  = prim_read_line(e, "ptr + 4 + i * elem")
+  let elem_pre_expr = match get_kind(e) {
+    "string" => "_writeString(elems[i])",
+    _ => if slot_is_inline(e) then "elems[i]" else to_wasm(e, "elems[i]"),
+  }
+  let write_e = slot_write_line(e, "ptr + 4 + i * elem", "_es[i]")
+  let read_e  = slot_read_line(e, "ptr + 4 + i * elem")
   [
     "function _writeSet_${sig}(s) {",
-    "  // Accepts Set<T> or iterable of T (dedup happens on the WASM side).",
     "  const elems = (s instanceof Set) ? Array.from(s) : Array.from(s);",
     "  const n = elems.length;",
+    "  // Pre-write pointer-shaped elements before outer alloc (see _writeMap_*).",
+    "  const _es = new Array(n);",
+    "  for (let i = 0; i < n; i++) _es[i] = ${elem_pre_expr};",
     "  const elem = ${int.to_string(e_size)};",
     "  const ptr = _exports.__alloc(4 + n * elem);",
     "  const view = new DataView(_exports.memory.buffer);",
@@ -1177,7 +1249,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
       let (lines, seen) = state
       let k = json.get(ty, "key") ?? json.null()
       let v = json.get(ty, "value") ?? json.null()
-      let sig = "${prim_sig(k)}${prim_sig(v)}"
+      let sig = "${type_sig(k)}_${type_sig(v)}"
       if list.contains(seen, sig) then (lines, seen)
       else (lines + emit_map_helpers(ty), seen + [sig])
     })
@@ -1188,7 +1260,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     let (acc, _) = all_sets |> list.fold(([], []), (state, ty) => {
       let (lines, seen) = state
       let e = json.get(ty, "inner") ?? json.null()
-      let sig = prim_sig(e)
+      let sig = type_sig(e)
       if list.contains(seen, sig) then (lines, seen)
       else (lines + emit_set_helpers(ty), seen + [sig])
     })
