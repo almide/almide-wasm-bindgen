@@ -816,6 +816,24 @@ test "generate_esm emits _writeSet_ / _readSet_ helpers per signature" {
   assert(string.contains(esm, "_writeSet_I(s)"))
 }
 
+test "generate_esm supports nested Map value types (List, Named)" {
+  // Map[String, List[Int]]
+  let iface_list = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"f\"," +
+    "\"params\":[{\"name\":\"m\",\"type\":{\"kind\":\"map\"," +
+      "\"key\":{\"kind\":\"string\"}," +
+      "\"value\":{\"kind\":\"list\",\"inner\":{\"kind\":\"int\"}}}}]," +
+    "\"return\":{\"kind\":\"unit\"}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface_list, "m")
+  assert(string.contains(esm, "function _writeMap_S_LI("))
+  assert(string.contains(esm, "function _readMap_S_LI("))
+  // Value slot uses nested list helpers, not direct primitive read.
+  assert(string.contains(esm, "_writeListInt"))
+  assert(string.contains(esm, "_readListInt"))
+}
+
 test "generate_dts emits Map<K,V> and Set<T> types" {
   let iface = "{\"module\":\"m\",\"types\":[]," +
     "\"functions\":[" +
