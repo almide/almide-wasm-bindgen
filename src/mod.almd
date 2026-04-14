@@ -97,7 +97,40 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
   "named"  => true,
   "matrix" => true,
   "tuple"  => tuple_supported(ty),
+  "map"    => {
+    let k = json.get(ty, "key") ?? json.null()
+    let v = json.get(ty, "value") ?? json.null()
+    map_key_supported(k) and map_value_supported(v)
+  },
+  "set"    => set_inner_supported(json.get(ty, "inner") ?? json.null()),
   _        => false,
+}
+
+// Map keys in v0.x: primitives + String. Almide's WASM map uses type-aware
+// equality (i64_eq, i32_eq, string.eq) on the key — we marshal primitives by
+// value and String by ptr, matching those comparators exactly.
+fn map_key_supported(k: Value) -> Bool = match get_kind(k) {
+  "int" => true, "float" => true, "bool" => true, "string" => true,
+  _ => false,
+}
+
+fn map_value_supported(v: Value) -> Bool = match get_kind(v) {
+  "int" => true, "float" => true, "bool" => true, "string" => true,
+  _ => false,
+}
+
+fn set_inner_supported(e: Value) -> Bool = match get_kind(e) {
+  "int" => true, "float" => true, "bool" => true, "string" => true,
+  _ => false,
+}
+
+// Signature char per primitive type (used in tuple/map/set helper names).
+fn prim_sig(ty: Value) -> String = match get_kind(ty) {
+  "int"    => "I",
+  "float"  => "F",
+  "bool"   => "B",
+  "string" => "S",
+  _        => "X",
 }
 
 // Tuple with primitive / string / named elements. Nested tuple/list/option
@@ -231,6 +264,12 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
     let parts = elems |> list.map((e) => ts_type(e)) |> list.join(", ")
     "[${parts}]"
   },
+  "map" => {
+    let k = ts_type(json.get(ty, "key") ?? json.null())
+    let v = ts_type(json.get(ty, "value") ?? json.null())
+    "Map<${k}, ${v}>"
+  },
+  "set" => "Set<${ts_type(json.get(ty, "inner") ?? json.null())}>",
   _        => "unknown",
 }
 
@@ -249,6 +288,12 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "named"  => "_write${get_str(ty, "name")}(${expr})",
   "matrix" => "_writeMatrix(${expr})",
   "tuple"  => "_writeTuple_${tuple_sig(ty)}(${expr})",
+  "map"    => {
+    let k = json.get(ty, "key") ?? json.null()
+    let v = json.get(ty, "value") ?? json.null()
+    "_writeMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
+  },
+  "set"    => "_writeSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
   _        => expr,
 }
 
@@ -268,6 +313,12 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "named"  => "_read${get_str(ty, "name")}(${expr})",
   "matrix" => "_readMatrix(${expr})",
   "tuple"  => "_readTuple_${tuple_sig(ty)}(${expr})",
+  "map"    => {
+    let k = json.get(ty, "key") ?? json.null()
+    let v = json.get(ty, "value") ?? json.null()
+    "_readMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
+  },
+  "set"    => "_readSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
   _        => expr,
 }
 
@@ -773,6 +824,148 @@ fn emit_tuple_helpers(ty: Value) -> List[String] = {
   write_block + read_block
 }
 
+// ── Map / Set helpers ────────────────────────────────────────────────
+// Almide WASM layouts (see emit_wasm/calls_map.rs, calls_set.rs):
+//   Map:  [len:i32][k0][v0][k1][v1]...
+//   Set:  [len:i32][e0][e1]...
+// Key/value widths = wasm_byte_size(ty). Keys are compared by Almide runtime
+// with type-aware equality (i64_eq, i32_eq, string.eq), so the byte layout
+// produced here must match what the runtime expects slot-for-slot.
+
+fn prim_write_line(ty: Value, dst_off: String, src: String) -> String = match get_kind(ty) {
+  "int"    => "view.setBigInt64(${dst_off}, BigInt(${src}), true);",
+  "float"  => "view.setFloat64(${dst_off}, ${src}, true);",
+  "bool"   => "view.setInt32(${dst_off}, ${src} ? 1 : 0, true);",
+  "string" => "view.setInt32(${dst_off}, _writeString(${src}), true);",
+  _        => "/* unsupported prim write: ${get_kind(ty)} */",
+}
+
+fn prim_read_line(ty: Value, src_off: String) -> String = match get_kind(ty) {
+  "int"    => "Number(view.getBigInt64(${src_off}, true))",
+  "float"  => "view.getFloat64(${src_off}, true)",
+  "bool"   => "view.getInt32(${src_off}, true) !== 0",
+  "string" => "_readString(view.getInt32(${src_off}, true))",
+  _        => "undefined /* unsupported prim read: ${get_kind(ty)} */",
+}
+
+fn emit_map_helpers(ty: Value) -> List[String] = {
+  let k = json.get(ty, "key") ?? json.null()
+  let v = json.get(ty, "value") ?? json.null()
+  let sig = "${prim_sig(k)}${prim_sig(v)}"
+  let k_size = wasm_byte_size(k)
+  let v_size = wasm_byte_size(v)
+  let pair_size = k_size + v_size
+  let k_off = "base"
+  let v_off = "base + ${int.to_string(k_size)}"
+  let write_k = prim_write_line(k, k_off, "key")
+  let write_v = prim_write_line(v, v_off, "val")
+  let read_k  = prim_read_line(k, k_off)
+  let read_v  = prim_read_line(v, v_off)
+  [
+    "function _writeMap_${sig}(m) {",
+    "  // Accepts Map<K,V> or iterable of [k,v] pairs.",
+    "  const entries = (m instanceof Map) ? Array.from(m.entries()) : Array.from(m);",
+    "  const n = entries.length;",
+    "  const pair = ${int.to_string(pair_size)};",
+    "  const ptr = _exports.__alloc(4 + n * pair);",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  view.setInt32(ptr, n, true);",
+    "  for (let i = 0; i < n; i++) {",
+    "    const [key, val] = entries[i];",
+    "    const base = ptr + 4 + i * pair;",
+    "    ${write_k}",
+    "    ${write_v}",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readMap_${sig}(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  const n = view.getInt32(ptr, true);",
+    "  const pair = ${int.to_string(pair_size)};",
+    "  const out = new Map();",
+    "  for (let i = 0; i < n; i++) {",
+    "    const base = ptr + 4 + i * pair;",
+    "    out.set(${read_k}, ${read_v});",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+  ]
+}
+
+fn emit_set_helpers(ty: Value) -> List[String] = {
+  let e = json.get(ty, "inner") ?? json.null()
+  let sig = prim_sig(e)
+  let e_size = wasm_byte_size(e)
+  let write_e = prim_write_line(e, "ptr + 4 + i * elem", "elems[i]")
+  let read_e  = prim_read_line(e, "ptr + 4 + i * elem")
+  [
+    "function _writeSet_${sig}(s) {",
+    "  // Accepts Set<T> or iterable of T (dedup happens on the WASM side).",
+    "  const elems = (s instanceof Set) ? Array.from(s) : Array.from(s);",
+    "  const n = elems.length;",
+    "  const elem = ${int.to_string(e_size)};",
+    "  const ptr = _exports.__alloc(4 + n * elem);",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  view.setInt32(ptr, n, true);",
+    "  for (let i = 0; i < n; i++) {",
+    "    ${write_e}",
+    "  }",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readSet_${sig}(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  const n = view.getInt32(ptr, true);",
+    "  const elem = ${int.to_string(e_size)};",
+    "  const out = new Set();",
+    "  for (let i = 0; i < n; i++) {",
+    "    out.add(${read_e});",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+  ]
+}
+
+// Collect all distinct map/set signatures used by supported fns.
+fn collect_maps_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
+  "map"    => [ty],
+  "list"   => collect_maps_in_ty(json.get(ty, "inner") ?? json.null()),
+  "option" => collect_maps_in_ty(json.get(ty, "inner") ?? json.null()),
+  "result" => {
+    let a = collect_maps_in_ty(json.get(ty, "ok") ?? json.null())
+    let b = collect_maps_in_ty(json.get(ty, "err") ?? json.null())
+    a + b
+  },
+  _ => [],
+}
+
+fn collect_sets_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
+  "set"    => [ty],
+  "list"   => collect_sets_in_ty(json.get(ty, "inner") ?? json.null()),
+  "option" => collect_sets_in_ty(json.get(ty, "inner") ?? json.null()),
+  "result" => {
+    let a = collect_sets_in_ty(json.get(ty, "ok") ?? json.null())
+    let b = collect_sets_in_ty(json.get(ty, "err") ?? json.null())
+    a + b
+  },
+  _ => [],
+}
+
+fn collect_maps_in_fn(fn_val: Value) -> List[Value] = {
+  let params = get_arr(fn_val, "params")
+  let pm = params |> list.flat_map((p) => collect_maps_in_ty(get_type(p)))
+  pm + collect_maps_in_ty(effective_return(fn_val))
+}
+
+fn collect_sets_in_fn(fn_val: Value) -> List[Value] = {
+  let params = get_arr(fn_val, "params")
+  let ps = params |> list.flat_map((p) => collect_sets_in_ty(get_type(p)))
+  ps + collect_sets_in_ty(effective_return(fn_val))
+}
+
 // Emit a TS interface declaration for a record type.
 fn emit_record_interface(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
@@ -937,6 +1130,31 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
       let sig = tuple_sig(ty)
       if list.contains(seen, sig) then (lines, seen)
       else (lines + emit_tuple_helpers(ty), seen + [sig])
+    })
+    acc
+  }
+
+  // Map / Set helpers — same per-shape dedup pattern.
+  let all_maps = supported |> list.flat_map((f) => collect_maps_in_fn(f))
+  let map_helpers = {
+    let (acc, _) = all_maps |> list.fold(([], []), (state, ty) => {
+      let (lines, seen) = state
+      let k = json.get(ty, "key") ?? json.null()
+      let v = json.get(ty, "value") ?? json.null()
+      let sig = "${prim_sig(k)}${prim_sig(v)}"
+      if list.contains(seen, sig) then (lines, seen)
+      else (lines + emit_map_helpers(ty), seen + [sig])
+    })
+    acc
+  }
+  let all_sets = supported |> list.flat_map((f) => collect_sets_in_fn(f))
+  let set_helpers = {
+    let (acc, _) = all_sets |> list.fold(([], []), (state, ty) => {
+      let (lines, seen) = state
+      let e = json.get(ty, "inner") ?? json.null()
+      let sig = prim_sig(e)
+      if list.contains(seen, sig) then (lines, seen)
+      else (lines + emit_set_helpers(ty), seen + [sig])
     })
     acc
   }
@@ -1423,7 +1641,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "",
   ] else []
 
-  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + tuple_helpers + fn_blocks) |> list.join("\n")
+  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + tuple_helpers + map_helpers + set_helpers + fn_blocks) |> list.join("\n")
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
