@@ -103,6 +103,7 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
     map_key_supported(k) and map_value_supported(v)
   },
   "set"    => set_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "bytes"  => true,
   _        => false,
 }
 
@@ -270,6 +271,7 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
     "Map<${k}, ${v}>"
   },
   "set" => "Set<${ts_type(json.get(ty, "inner") ?? json.null())}>",
+  "bytes" => "Uint8Array",
   _        => "unknown",
 }
 
@@ -294,6 +296,7 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
     "_writeMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
   },
   "set"    => "_writeSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "bytes"  => "_writeBytes(${expr})",
   _        => expr,
 }
 
@@ -319,6 +322,7 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
     "_readMap_${prim_sig(k)}${prim_sig(v)}(${expr})"
   },
   "set"    => "_readSet_${prim_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "bytes"  => "_readBytes(${expr})",
   _        => expr,
 }
 
@@ -1134,6 +1138,38 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     acc
   }
 
+  // Bytes helpers — fixed shape (Uint8Array), emit once when referenced.
+  // Layout matches emit_wasm/calls_bytes.rs: [len:i32][data:u8...], identical
+  // to String but opaque (no UTF-8 decode, raw bytes).
+  let fn_uses_bytes = (f: Value) => {
+    let params = get_arr(f, "params")
+    let any_p = params |> list.fold(false, (acc, p) => acc or get_kind(get_type(p)) == "bytes")
+    any_p or get_kind(effective_return(f)) == "bytes"
+  }
+  let uses_bytes = supported |> list.fold(false, (acc, f) => acc or fn_uses_bytes(f))
+  let bytes_helpers = if uses_bytes then [
+    "// --- Bytes marshalling (opaque Uint8Array) ---------------------------",
+    "// Layout: [len:i32 LE][data:u8...]  (matches String; no UTF-8 decode).",
+    "function _writeBytes(arr) {",
+    "  // Accepts Uint8Array or number[] (Array.from used as fallback).",
+    "  const src = (arr instanceof Uint8Array) ? arr : Uint8Array.from(arr);",
+    "  const n = src.length;",
+    "  const ptr = _exports.__alloc(4 + n);",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  view.setInt32(ptr, n, true);",
+    "  new Uint8Array(_exports.memory.buffer, ptr + 4, n).set(src);",
+    "  return ptr;",
+    "}",
+    "",
+    "function _readBytes(ptr) {",
+    "  const view = new DataView(_exports.memory.buffer);",
+    "  const n = view.getInt32(ptr, true);",
+    "  // .slice() copies out so the returned buffer survives WASM memory grow.",
+    "  return new Uint8Array(_exports.memory.buffer, ptr + 4, n).slice();",
+    "}",
+    "",
+  ] else []
+
   // Map / Set helpers — same per-shape dedup pattern.
   let all_maps = supported |> list.flat_map((f) => collect_maps_in_fn(f))
   let map_helpers = {
@@ -1641,7 +1677,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "",
   ] else []
 
-  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + tuple_helpers + map_helpers + set_helpers + fn_blocks) |> list.join("\n")
+  (preamble + shim_noop + import_shim + matrix_helpers + bytes_helpers + record_helpers + tuple_helpers + map_helpers + set_helpers + fn_blocks) |> list.join("\n")
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
