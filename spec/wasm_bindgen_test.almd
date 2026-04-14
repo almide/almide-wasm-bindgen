@@ -721,6 +721,47 @@ test "generate_esm emits Matrix handle class + _writeMatrix / _readMatrix" {
 }
 
 // ═══════════════════════════════════════════════════════
+// Tuple marshalling
+// ═══════════════════════════════════════════════════════
+test "generate_esm emits _writeTuple_/_readTuple_ helpers per signature" {
+  // fn swap(p: (Int, String)) -> (String, Int)
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"swap\"," +
+    "\"params\":[{\"name\":\"p\",\"type\":{\"kind\":\"tuple\"," +
+      "\"elements\":[{\"kind\":\"int\"},{\"kind\":\"string\"}]}}]," +
+    "\"return\":{\"kind\":\"tuple\"," +
+      "\"elements\":[{\"kind\":\"string\"},{\"kind\":\"int\"}]}}" +
+    "]}";
+  let esm = wasm_bindgen.generate_esm(iface, "m")
+  // One helper pair per distinct signature
+  assert(string.contains(esm, "function _writeTuple_IS("))
+  assert(string.contains(esm, "function _readTuple_IS("))
+  assert(string.contains(esm, "function _writeTuple_SI("))
+  assert(string.contains(esm, "function _readTuple_SI("))
+  // Helpers packed sequentially (Int = 8 bytes at offset 0, String ptr at 8)
+  assert(string.contains(esm, "view.setBigInt64(ptr + 0, BigInt(arr[0]), true);"))
+  assert(string.contains(esm, "view.setInt32(ptr + 8, _t1, true);"))
+  // Call sites use tuple sig
+  assert(string.contains(esm, "_writeTuple_IS(p)"))
+  assert(string.contains(esm, "_readTuple_SI(_exports.swap"))
+}
+
+test "generate_dts emits TS tuple literal types" {
+  let iface = "{\"module\":\"m\",\"types\":[]," +
+    "\"functions\":[" +
+    "{\"name\":\"swap\"," +
+    "\"params\":[{\"name\":\"p\",\"type\":{\"kind\":\"tuple\"," +
+      "\"elements\":[{\"kind\":\"int\"},{\"kind\":\"string\"}]}}]," +
+    "\"return\":{\"kind\":\"tuple\"," +
+      "\"elements\":[{\"kind\":\"string\"},{\"kind\":\"int\"}]}}" +
+    "]}";
+  let dts = wasm_bindgen.generate_dts(iface, "m")
+  // TS tuple literal, strongly positional
+  assert(string.contains(dts, "swap(p: [number, string]): [string, number]"))
+}
+
+// ═══════════════════════════════════════════════════════
 // JSDoc emission in .d.ts
 // ═══════════════════════════════════════════════════════
 test "generate_dts emits Almide-style signature in JSDoc" {
