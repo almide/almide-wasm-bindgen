@@ -1,0 +1,5 @@
+import self as wasm_bindgen
+
+effect fn main() -> Unit = {
+  println(wasm_bindgen.generate_package_json("hello", "0.1.0"))
+}

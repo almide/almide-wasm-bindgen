@@ -1,0 +1,64 @@
+// pack.almd — Full WASM + JS/TS packaging orchestrator.
+//
+// Takes a .almd source, runs the full pipeline:
+//   1. almide compile --json    → interface.json
+//   2. almide build --target wasm → <mod>.wasm
+//   3. wasm_bindgen.generate_esm/dts/package_json → <mod>.js, <mod>.d.ts, package.json
+//   4. writes everything to <outdir>
+//
+// Usage:
+//   almide run examples/pack.almd <source.almd> <outdir> [module_name]
+//
+// Example:
+//   almide run examples/pack.almd ../almide-js/examples/hello/hello.almd /tmp/pkg hello
+
+import fs
+import env
+import process
+import json
+import self as wasm_bindgen
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let source_path = list.get(args, 0) ?? ""
+  let outdir = list.get(args, 1) ?? ""
+  let module_name_arg = list.get(args, 2) ?? ""
+
+  if source_path == "" or outdir == "" then {
+    println("Usage: almide run pack.almd <source.almd> <outdir> [module_name]")
+    process.exit(1)
+  }
+
+  // 1. interface
+  println("[1/4] Compiling interface from ${source_path}...")
+  let iface_json = process.exec("almide", ["compile", source_path, "--json"])!
+  let iface = json.parse(iface_json) ?? json.null()
+  let module_name = if module_name_arg == ""
+    then (json.as_string(json.get(iface, "module") ?? json.null()) ?? "module")
+    else "${module_name_arg}"
+
+  // Ensure outdir exists.
+  let _mkdir = fs.mkdir_p(outdir)!
+
+  // 2. wasm build
+  println("[2/4] Building wasm (--target wasm)...")
+  let wasm_path = "${outdir}/${module_name}.wasm"
+  let _build = process.exec("almide", ["build", source_path, "-o", wasm_path, "--target", "wasm"])!
+
+  // 3. JS ESM glue
+  println("[3/4] Generating ESM glue + .d.ts + package.json...")
+  let esm = wasm_bindgen.generate_esm(iface_json, module_name)
+  let dts = wasm_bindgen.generate_dts(iface_json, module_name)
+  let pkg = wasm_bindgen.generate_package_json(module_name, "0.1.0")
+
+  // 4. write files
+  fs.write("${outdir}/${module_name}.js", esm)!
+  fs.write("${outdir}/${module_name}.d.ts", dts)!
+  fs.write("${outdir}/package.json", pkg)!
+
+  println("[4/4] Done.")
+  println("  ${outdir}/${module_name}.wasm")
+  println("  ${outdir}/${module_name}.js")
+  println("  ${outdir}/${module_name}.d.ts")
+  println("  ${outdir}/package.json")
+}

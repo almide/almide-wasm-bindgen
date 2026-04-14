@@ -1,0 +1,16 @@
+// Demo: read a real iface.json from disk, print generated .d.ts.
+// Usage: almide compile <path>/hello.almd --json > /tmp/iface.json
+//        almide run examples/dts_demo.almd /tmp/iface.json hello
+
+import fs
+import env
+import self as wasm_bindgen
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let iface_path = list.get(args, 0) ?? "/tmp/iface.json"
+  let module_name = list.get(args, 1) ?? "hello"
+  let iface_json = fs.read_text(iface_path)!
+  let dts = wasm_bindgen.generate_dts(iface_json, module_name)
+  println(dts)
+}

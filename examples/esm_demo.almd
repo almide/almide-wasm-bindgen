@@ -1,0 +1,17 @@
+// Demo: generate ESM for a module and write it to stdout.
+// Usage:
+//   almide compile <path>/hello.almd --json > /tmp/iface.json
+//   almide run examples/esm_demo.almd /tmp/iface.json hello > /tmp/hello.js
+
+import fs
+import env
+import self as wasm_bindgen
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let iface_path = list.get(args, 0) ?? "/tmp/iface.json"
+  let module_name = list.get(args, 1) ?? "hello"
+  let iface_json = fs.read_text(iface_path)!
+  let esm = wasm_bindgen.generate_esm(iface_json, module_name)
+  println(esm)
+}

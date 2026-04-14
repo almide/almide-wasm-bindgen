@@ -1,0 +1,260 @@
+// Tests for almide-wasm-bindgen
+import json
+import self as wasm_bindgen
+
+// ═══════════════════════════════════════════════════════
+// Public API
+// ═══════════════════════════════════════════════════════
+test "version is not empty" {
+  assert(string.len(wasm_bindgen.version()) > 0)
+}
+
+// ═══════════════════════════════════════════════════════
+// ts_type mapping
+// ═══════════════════════════════════════════════════════
+test "ts_type maps int to number" {
+  let ty = json.object([("kind", json.from_string("int"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "number")
+}
+
+test "ts_type maps float to number" {
+  let ty = json.object([("kind", json.from_string("float"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "number")
+}
+
+test "ts_type maps bool to boolean" {
+  let ty = json.object([("kind", json.from_string("bool"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "boolean")
+}
+
+test "ts_type maps string to string" {
+  let ty = json.object([("kind", json.from_string("string"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "string")
+}
+
+test "ts_type maps unit to void" {
+  let ty = json.object([("kind", json.from_string("unit"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "void")
+}
+
+test "ts_type falls back to unknown" {
+  let ty = json.object([("kind", json.from_string("list"))]);
+  assert_eq(wasm_bindgen.ts_type(ty), "unknown")
+}
+
+// ═══════════════════════════════════════════════════════
+// to_wasm / from_wasm marshalling expressions
+// ═══════════════════════════════════════════════════════
+test "to_wasm wraps int with BigInt" {
+  let ty = json.object([("kind", json.from_string("int"))]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "x"), "BigInt(x)")
+}
+
+test "to_wasm passes float through" {
+  let ty = json.object([("kind", json.from_string("float"))]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "y"), "y")
+}
+
+test "to_wasm converts bool to 0/1" {
+  let ty = json.object([("kind", json.from_string("bool"))]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "b"), "(b ? 1 : 0)")
+}
+
+test "to_wasm string uses _writeString" {
+  let ty = json.object([("kind", json.from_string("string"))]);
+  assert_eq(wasm_bindgen.to_wasm(ty, "s"), "_writeString(s)")
+}
+
+test "from_wasm int via Number" {
+  let ty = json.object([("kind", json.from_string("int"))]);
+  assert_eq(wasm_bindgen.from_wasm(ty, "v"), "Number(v)")
+}
+
+test "from_wasm bool compares to 0" {
+  let ty = json.object([("kind", json.from_string("bool"))]);
+  assert_eq(wasm_bindgen.from_wasm(ty, "v"), "(v !== 0)")
+}
+
+test "from_wasm string uses _readString" {
+  let ty = json.object([("kind", json.from_string("string"))]);
+  assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readString(p)")
+}
+
+// ═══════════════════════════════════════════════════════
+// generate_package_json
+// ═══════════════════════════════════════════════════════
+test "generate_package_json produces valid JSON with module name" {
+  let s = wasm_bindgen.generate_package_json("hello", "0.1.0")
+  // spot-check key fields appear verbatim
+  assert(string.contains(s, "\"name\": \"hello\""))
+  assert(string.contains(s, "\"version\": \"0.1.0\""))
+  assert(string.contains(s, "\"type\": \"module\""))
+  assert(string.contains(s, "\"main\": \"hello.js\""))
+  assert(string.contains(s, "\"types\": \"hello.d.ts\""))
+  assert(string.contains(s, "\"hello.wasm\""))
+}
+
+test "generate_package_json defaults version when empty" {
+  let s = wasm_bindgen.generate_package_json("foo", "")
+  assert(string.contains(s, "\"version\": \"0.1.0\""))
+  assert(string.contains(s, "\"name\": \"foo\""))
+}
+
+test "generate_package_json output parses as JSON" {
+  let s = wasm_bindgen.generate_package_json("mylib", "1.2.3")
+  let parsed = json.parse(s) ?? json.null()
+  assert_eq(json.as_string(json.get(parsed, "name") ?? json.null()) ?? "", "mylib")
+  assert_eq(json.as_string(json.get(parsed, "version") ?? json.null()) ?? "", "1.2.3")
+  assert_eq(json.as_string(json.get(parsed, "main") ?? json.null()) ?? "", "mylib.js")
+}
+
+// ═══════════════════════════════════════════════════════
+// is_supported_ty / is_supported_fn
+// ═══════════════════════════════════════════════════════
+test "is_supported_ty covers v0.1 set" {
+  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("int"))])))
+  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("float"))])))
+  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("bool"))])))
+  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("string"))])))
+  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("unit"))])))
+}
+
+test "is_supported_ty rejects compound types" {
+  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("list"))])))
+  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("record"))])))
+  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("variant"))])))
+}
+
+test "is_supported_fn excludes main" {
+  let main_fn = json.object([
+    ("name", json.from_string("main")),
+    ("params", json.array([])),
+    ("return", json.object([("kind", json.from_string("unit"))])),
+  ])
+  assert(not wasm_bindgen.is_supported_fn(main_fn))
+}
+
+test "is_supported_fn accepts simple fn" {
+  let greet = json.object([
+    ("name", json.from_string("greet")),
+    ("params", json.array([
+      json.object([
+        ("name", json.from_string("name")),
+        ("type", json.object([("kind", json.from_string("string"))])),
+      ]),
+    ])),
+    ("return", json.object([("kind", json.from_string("string"))])),
+  ])
+  assert(wasm_bindgen.is_supported_fn(greet))
+}
+
+test "is_supported_fn rejects fn with list param" {
+  let bad = json.object([
+    ("name", json.from_string("sum")),
+    ("params", json.array([
+      json.object([
+        ("name", json.from_string("xs")),
+        ("type", json.object([("kind", json.from_string("list"))])),
+      ]),
+    ])),
+    ("return", json.object([("kind", json.from_string("int"))])),
+  ])
+  assert(not wasm_bindgen.is_supported_fn(bad))
+}
+
+// ═══════════════════════════════════════════════════════
+// generate_dts — end-to-end against the hello.almd interface
+// ═══════════════════════════════════════════════════════
+test "generate_dts emits init declaration" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[]}"
+  let dts = wasm_bindgen.generate_dts(iface, "hello")
+  assert(string.contains(dts, "export default function init"))
+  assert(string.contains(dts, "Promise<void>"))
+}
+
+test "generate_dts emits export for greet" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"greet\",\"params\":[{\"name\":\"name\",\"type\":{\"kind\":\"string\"}}],\"return\":{\"kind\":\"string\"}}" +
+    "]}"
+  let dts = wasm_bindgen.generate_dts(iface, "hello")
+  assert(string.contains(dts, "export function greet(name: string): string;"))
+}
+
+test "generate_dts emits multiple fns and maps primitives" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"add\",\"params\":[{\"name\":\"a\",\"type\":{\"kind\":\"int\"}},{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"int\"}}," +
+    "{\"name\":\"scale\",\"params\":[{\"name\":\"x\",\"type\":{\"kind\":\"float\"}}],\"return\":{\"kind\":\"float\"}}," +
+    "{\"name\":\"is_positive\",\"params\":[{\"name\":\"x\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"bool\"}}" +
+    "]}"
+  let dts = wasm_bindgen.generate_dts(iface, "hello")
+  assert(string.contains(dts, "export function add(a: number, b: number): number;"))
+  assert(string.contains(dts, "export function scale(x: number): number;"))
+  assert(string.contains(dts, "export function is_positive(x: number): boolean;"))
+}
+
+test "generate_dts skips main" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"main\",\"params\":[],\"return\":{\"kind\":\"unit\"},\"effect\":true}" +
+    "]}"
+  let dts = wasm_bindgen.generate_dts(iface, "hello")
+  assert(not string.contains(dts, "export function main"))
+}
+
+test "generate_dts skips unsupported fns" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"add\",\"params\":[{\"name\":\"a\",\"type\":{\"kind\":\"int\"}},{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"int\"}}," +
+    "{\"name\":\"sum\",\"params\":[{\"name\":\"xs\",\"type\":{\"kind\":\"list\"}}],\"return\":{\"kind\":\"int\"}}" +
+    "]}"
+  let dts = wasm_bindgen.generate_dts(iface, "hello")
+  assert(string.contains(dts, "export function add"))
+  assert(not string.contains(dts, "export function sum"))
+}
+
+// ═══════════════════════════════════════════════════════
+// generate_esm
+// ═══════════════════════════════════════════════════════
+test "generate_esm emits header + init + string helpers" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[]}"
+  let esm = wasm_bindgen.generate_esm(iface, "hello")
+  assert(string.contains(esm, "// Generated by almide-wasm-bindgen"))
+  assert(string.contains(esm, "export default async function init"))
+  assert(string.contains(esm, "new URL('./hello.wasm', import.meta.url)"))
+  assert(string.contains(esm, "wasi_snapshot_preview1"))
+  assert(string.contains(esm, "function _writeString"))
+  assert(string.contains(esm, "function _readString"))
+  assert(string.contains(esm, "__alloc"))
+}
+
+test "generate_esm emits per-fn wrapper with correct marshalling" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"greet\",\"params\":[{\"name\":\"name\",\"type\":{\"kind\":\"string\"}}],\"return\":{\"kind\":\"string\"}}" +
+    "]}"
+  let esm = wasm_bindgen.generate_esm(iface, "hello")
+  assert(string.contains(esm, "export function greet(name)"))
+  assert(string.contains(esm, "_readString(_exports.greet(_writeString(name)))"))
+  assert(string.contains(esm, "call init() before greet()"))
+}
+
+test "generate_esm int args use BigInt and return Number" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"add\",\"params\":[{\"name\":\"a\",\"type\":{\"kind\":\"int\"}},{\"name\":\"b\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"int\"}}" +
+    "]}"
+  let esm = wasm_bindgen.generate_esm(iface, "hello")
+  assert(string.contains(esm, "Number(_exports.add(BigInt(a), BigInt(b)))"))
+}
+
+test "generate_esm bool returns compare against 0" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"is_positive\",\"params\":[{\"name\":\"x\",\"type\":{\"kind\":\"int\"}}],\"return\":{\"kind\":\"bool\"}}" +
+    "]}"
+  let esm = wasm_bindgen.generate_esm(iface, "hello")
+  assert(string.contains(esm, "(_exports.is_positive(BigInt(x)) !== 0)"))
+}
+
+test "generate_esm skips main" {
+  let iface = "{\"module\":\"hello\",\"types\":[],\"functions\":[" +
+    "{\"name\":\"main\",\"params\":[],\"return\":{\"kind\":\"unit\"}}" +
+    "]}"
+  let esm = wasm_bindgen.generate_esm(iface, "hello")
+  assert(not string.contains(esm, "export function main"))
+}
