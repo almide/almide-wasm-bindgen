@@ -701,8 +701,9 @@ test "generate_esm emits _writeMatrix / _readMatrix with zero-copy view" {
   assert(string.contains(esm, "function _writeMatrix"))
   assert(string.contains(esm, "function _readMatrix"))
   assert(string.contains(esm, "new Float64Array(buf, ptr + 8, rows * cols)"))
-  // Write uses Float64Array.set when input is a typed array
-  assert(string.contains(esm, "out.set(data)"))
+  // Write detaches the input from WASM memory before alloc to survive grow
+  assert(string.contains(esm, "data.slice()"))
+  assert(string.contains(esm, ".set(src)"))
 }
 
 // ═══════════════════════════════════════════════════════

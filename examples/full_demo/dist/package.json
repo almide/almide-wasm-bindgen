@@ -1,0 +1,11 @@
+{
+  "name": "full_demo",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "full_demo.js",
+  "types": "full_demo.d.ts",
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "keywords": ["wasm", "webassembly", "almide"],
+  "files": ["full_demo.js", "full_demo.d.ts", "full_demo.wasm", "full_demo.wit"]
+}

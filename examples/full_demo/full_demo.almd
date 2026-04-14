@@ -1,0 +1,46 @@
+// almide-wasm-bindgen comprehensive demo — exercises every type the
+// generator currently supports. This doubles as a smoke test.
+
+// ── Records and variants ───────────────────────────────────────────────
+type Color = { r: Float, g: Float, b: Float }
+type Box = { topleft: Color, label: String, weight: Int }
+type Shape =
+  | Circle(Float)
+  | Square(Float)
+  | Empty
+
+// ── Primitives ─────────────────────────────────────────────────────────
+fn add_int(a: Int, b: Int) -> Int = a + b
+fn flip(b: Bool) -> Bool = not b
+fn upper(s: String) -> String = string.to_upper(s)
+
+// ── Optional / Result ──────────────────────────────────────────────────
+fn try_div(a: Int, b: Int) -> Option[Int] =
+  if b == 0 then None else Some(a / b)
+
+effect fn safe_parse(s: String) -> Int = int.parse(s)!
+
+// ── Lists (primitive + nested) ─────────────────────────────────────────
+fn sum(xs: List[Int]) -> Int = list.fold(xs, 0, (a, b) => a + b)
+fn reverse_strs(xs: List[String]) -> List[String] = list.reverse(xs)
+fn drop_nones(xs: List[Option[Int]]) -> List[Int] =
+  xs |> list.filter_map((o) => o)
+
+// ── Records (incl. nested + with String) ──────────────────────────────
+fn lighten(c: Color, k: Float) -> Color =
+  { r: c.r * k, g: c.g * k, b: c.b * k }
+
+fn box_label(b: Box) -> String =
+  "${b.label} (${int.to_string(b.weight)}g)"
+
+// ── Variants ──────────────────────────────────────────────────────────
+fn area(s: Shape) -> Float = match s {
+  Circle(r) => 3.14159 * r * r,
+  Square(side) => side * side,
+  Empty => 0.0,
+}
+
+// ── Matrix (zero-copy view) ───────────────────────────────────────────
+fn double_mat(m: Matrix) -> Matrix = matrix.scale(m, 2.0)
+
+effect fn main() -> () = { println("ok") }
