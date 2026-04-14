@@ -637,7 +637,7 @@ fn version() -> String = "0.0.1"
 
 fn wit_type(ty: Value) -> String = match get_kind(ty) {
   "int"    => "s64",
-  "float"  => "float64",
+  "float"  => "f64",
   "bool"   => "bool",
   "string" => "string",
   "unit"   => "",
