@@ -776,7 +776,11 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
   let iface = json.parse(iface_json) ?? json.null()
   let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
-  let supported = fns |> list.filter((f) => is_supported_fn(f))
+  // Exports (things the user calls) vs imports (things WASM calls back to JS).
+  // `import` field on a fn marks it as a @extern(wasm, "mod", "name") target.
+  let is_import = (f: Value) => (json.get(f, "import") ?? json.null()) != json.null()
+  let supported = fns |> list.filter((f) => not is_import(f) and is_supported_fn(f))
+  let js_imports = fns |> list.filter((f) => is_import(f))
 
   // Per-type record helpers injected after string/list/option/result helpers.
   // Filter to only those types referenced by supported fns (same as dts).
@@ -837,7 +841,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "",
     "let _exports = null;",
     "",
-    "export default async function init(wasmUrl) {",
+    "export default async function init(wasmUrl, jsImports = {}) {",
     "  const url = wasmUrl ?? new URL('./${module_name}.wasm', import.meta.url);",
     "  // Minimal WASI shim: fd_write routes stdout/stderr through console,",
     "  // other syscalls are no-ops. Enough for println/print-style output.",
@@ -874,7 +878,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     "      return () => 0;",
     "    },",
     "  });",
-    "  const imports = { wasi_snapshot_preview1: wasi };",
+    "  const imports = { wasi_snapshot_preview1: wasi, ..._buildJsImports(jsImports) };",
     "  const isNode = typeof process !== 'undefined' && process.versions?.node;",
     "  const urlStr = url.toString();",
     "  const wasmBytes = (isNode && urlStr.startsWith('file:'))",
@@ -1180,7 +1184,74 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
     ]
   })
 
-  (preamble + matrix_helpers + record_helpers + fn_blocks) |> list.join("\n")
+  // --- JS import shim emission ----------------------------------------
+  // For each @extern(wasm, "module", "name") fn, emit a wrapped dispatcher
+  // that: (a) pulls the user-supplied callback from jsImports[module][name],
+  // (b) marshals WASM→JS for each param (from_wasm), (c) invokes the
+  // callback, (d) marshals JS→WASM for the return value (to_wasm), and
+  // (e) throws a helpful error when the host forgot to supply the callback.
+  //
+  // Only primitive import types (Int/Float/Bool/Unit) are supported in this
+  // iter. Pointer-shaped imports (String/List/Record) would need lifetime
+  // handling around the call — deferred.
+  let import_shim = if list.len(js_imports) == 0 then [] else {
+    let header = [
+      "// --- JS import shim ----------------------------------------------------",
+      "// The Almide module declares (import \"mod\" \"name\" ...) for every fn",
+      "// annotated with @extern(wasm, \"mod\", \"name\"). The host supplies the",
+      "// implementations via the jsImports arg to init():",
+      "//",
+      "//   await init(undefined, { js: { console_log_i64: (x) => console.log(x) } })",
+      "",
+      "function _buildJsImports(user) {",
+      "  const out = {};",
+    ]
+    let per_import = js_imports |> list.flat_map((f) => {
+      let imp = json.get(f, "import") ?? json.null()
+      let mod_name = get_str(imp, "module")
+      let fn_name = get_str(imp, "name")
+      let params = get_arr(f, "params")
+      let ret = effective_return(f)
+      let param_names = params |> list.enumerate |> list.map((entry) => {
+        let (i, _) = entry
+        "a${int.to_string(i)}"
+      }) |> list.join(", ")
+      let js_args = params |> list.enumerate |> list.map((entry) => {
+        let (i, p) = entry
+        from_wasm(get_type(p), "a${int.to_string(i)}")
+      }) |> list.join(", ")
+      let raw_call = "cb(${js_args})"
+      let call_body = if get_kind(ret) == "unit" then "${raw_call};"
+                      else "return ${to_wasm(ret, raw_call)};"
+      let err_msg = "almide-wasm-bindgen: missing import '${mod_name}.${fn_name}' — supply it via init(url, { ${mod_name}: { ${fn_name}: (...) => ... } })"
+      [
+        "  if (!out[\"${mod_name}\"]) out[\"${mod_name}\"] = {};",
+        "  out[\"${mod_name}\"][\"${fn_name}\"] = (${param_names}) => {",
+        "    const cb = user?.[\"${mod_name}\"]?.[\"${fn_name}\"];",
+        "    if (typeof cb !== \"function\") {",
+        "      throw new Error(\"${err_msg}\");",
+        "    }",
+        "    ${call_body}",
+        "  };",
+      ]
+    })
+    let footer = [
+      "  return out;",
+      "}",
+      "",
+    ]
+    header + per_import + footer
+  }
+
+  // Early init() fall-back: when the module has no @extern(wasm,...) imports,
+  // _buildJsImports is referenced but never defined. Add a no-op so the same
+  // init() preamble template stays valid for both cases.
+  let shim_noop = if list.len(js_imports) == 0 then [
+    "function _buildJsImports(_user) { return {}; }",
+    "",
+  ] else []
+
+  (preamble + shim_noop + import_shim + matrix_helpers + record_helpers + fn_blocks) |> list.join("\n")
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
