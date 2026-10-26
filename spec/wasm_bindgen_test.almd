@@ -13,39 +13,39 @@ test "version is not empty" {
 // ts_type mapping
 // ═══════════════════════════════════════════════════════
 test "ts_type maps int to number" {
-  let ty = json.object([("kind", json.from_string("int"))]);
+  let ty = value.object([("kind", value.string("int"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "number")
 }
 
 test "ts_type maps float to number" {
-  let ty = json.object([("kind", json.from_string("float"))]);
+  let ty = value.object([("kind", value.string("float"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "number")
 }
 
 test "ts_type maps bool to boolean" {
-  let ty = json.object([("kind", json.from_string("bool"))]);
+  let ty = value.object([("kind", value.string("bool"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "boolean")
 }
 
 test "ts_type maps string to string" {
-  let ty = json.object([("kind", json.from_string("string"))]);
+  let ty = value.object([("kind", value.string("string"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "string")
 }
 
 test "ts_type maps unit to void" {
-  let ty = json.object([("kind", json.from_string("unit"))]);
+  let ty = value.object([("kind", value.string("unit"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "void")
 }
 
 test "ts_type falls back to unknown" {
-  let ty = json.object([("kind", json.from_string("variant"))]);
+  let ty = value.object([("kind", value.string("variant"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "unknown")
 }
 
 test "ts_type handles list of int" {
-  let ty = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.ts_type(ty), "number[]")
 }
@@ -54,37 +54,37 @@ test "ts_type handles list of int" {
 // to_wasm / from_wasm marshalling expressions
 // ═══════════════════════════════════════════════════════
 test "to_wasm wraps int with BigInt" {
-  let ty = json.object([("kind", json.from_string("int"))]);
+  let ty = value.object([("kind", value.string("int"))]);
   assert_eq(wasm_bindgen.to_wasm(ty, "x"), "BigInt(x)")
 }
 
 test "to_wasm passes float through" {
-  let ty = json.object([("kind", json.from_string("float"))]);
+  let ty = value.object([("kind", value.string("float"))]);
   assert_eq(wasm_bindgen.to_wasm(ty, "y"), "y")
 }
 
 test "to_wasm converts bool to 0/1" {
-  let ty = json.object([("kind", json.from_string("bool"))]);
+  let ty = value.object([("kind", value.string("bool"))]);
   assert_eq(wasm_bindgen.to_wasm(ty, "b"), "(b ? 1 : 0)")
 }
 
 test "to_wasm string uses _writeString" {
-  let ty = json.object([("kind", json.from_string("string"))]);
+  let ty = value.object([("kind", value.string("string"))]);
   assert_eq(wasm_bindgen.to_wasm(ty, "s"), "_writeString(s)")
 }
 
 test "from_wasm int via Number" {
-  let ty = json.object([("kind", json.from_string("int"))]);
+  let ty = value.object([("kind", value.string("int"))]);
   assert_eq(wasm_bindgen.from_wasm(ty, "v"), "Number(v)")
 }
 
 test "from_wasm bool compares to 0" {
-  let ty = json.object([("kind", json.from_string("bool"))]);
+  let ty = value.object([("kind", value.string("bool"))]);
   assert_eq(wasm_bindgen.from_wasm(ty, "v"), "(v !== 0)")
 }
 
 test "from_wasm string uses _readString" {
-  let ty = json.object([("kind", json.from_string("string"))]);
+  let ty = value.object([("kind", value.string("string"))]);
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readString(p)")
 }
 
@@ -110,10 +110,10 @@ test "generate_package_json defaults version when empty" {
 
 test "generate_package_json output parses as JSON" {
   let s = wasm_bindgen.generate_package_json("mylib", "1.2.3")
-  let parsed = json.parse(s) ?? json.null()
-  assert_eq(json.as_string(json.get(parsed, "name") ?? json.null()) ?? "", "mylib")
-  assert_eq(json.as_string(json.get(parsed, "version") ?? json.null()) ?? "", "1.2.3")
-  assert_eq(json.as_string(json.get(parsed, "main") ?? json.null()) ?? "", "mylib.js")
+  let parsed = json.parse(s) ?? value.null()
+  assert_eq(value.as_string(value.get(parsed, "name") ?? value.null())? ?? "", "mylib")
+  assert_eq(value.as_string(value.get(parsed, "version") ?? value.null())? ?? "", "1.2.3")
+  assert_eq(value.as_string(value.get(parsed, "main") ?? value.null())? ?? "", "mylib.js")
 }
 
 test "generate_package_json includes sideEffects/engines/keywords" {
@@ -131,70 +131,70 @@ test "generate_package_json includes sideEffects/engines/keywords" {
 // is_supported_ty / is_supported_fn
 // ═══════════════════════════════════════════════════════
 test "is_supported_ty covers v0.1 set" {
-  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("int"))])))
-  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("float"))])))
-  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("bool"))])))
-  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("string"))])))
-  assert(wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("unit"))])))
+  assert(wasm_bindgen.is_supported_ty(value.object([("kind", value.string("int"))])))
+  assert(wasm_bindgen.is_supported_ty(value.object([("kind", value.string("float"))])))
+  assert(wasm_bindgen.is_supported_ty(value.object([("kind", value.string("bool"))])))
+  assert(wasm_bindgen.is_supported_ty(value.object([("kind", value.string("string"))])))
+  assert(wasm_bindgen.is_supported_ty(value.object([("kind", value.string("unit"))])))
 }
 
 test "is_supported_ty rejects compound types" {
-  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("list"))])))
-  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("record"))])))
-  assert(not wasm_bindgen.is_supported_ty(json.object([("kind", json.from_string("variant"))])))
+  assert(not wasm_bindgen.is_supported_ty(value.object([("kind", value.string("list"))])))
+  assert(not wasm_bindgen.is_supported_ty(value.object([("kind", value.string("record"))])))
+  assert(not wasm_bindgen.is_supported_ty(value.object([("kind", value.string("variant"))])))
 }
 
 test "is_supported_fn excludes main" {
-  let main_fn = json.object([
-    ("name", json.from_string("main")),
-    ("params", json.array([])),
-    ("return", json.object([("kind", json.from_string("unit"))])),
+  let main_fn = value.object([
+    ("name", value.string("main")),
+    ("params", value.array([])),
+    ("return", value.object([("kind", value.string("unit"))])),
   ])
   assert(not wasm_bindgen.is_supported_fn(main_fn))
 }
 
 test "is_supported_fn accepts simple fn" {
-  let greet = json.object([
-    ("name", json.from_string("greet")),
-    ("params", json.array([
-      json.object([
-        ("name", json.from_string("name")),
-        ("type", json.object([("kind", json.from_string("string"))])),
+  let greet = value.object([
+    ("name", value.string("greet")),
+    ("params", value.array([
+      value.object([
+        ("name", value.string("name")),
+        ("type", value.object([("kind", value.string("string"))])),
       ]),
     ])),
-    ("return", json.object([("kind", json.from_string("string"))])),
+    ("return", value.object([("kind", value.string("string"))])),
   ])
   assert(wasm_bindgen.is_supported_fn(greet))
 }
 
 test "is_supported_fn rejects fn with list without inner" {
   // list with no inner kind → list_inner_supported returns false
-  let bad = json.object([
-    ("name", json.from_string("sum")),
-    ("params", json.array([
-      json.object([
-        ("name", json.from_string("xs")),
-        ("type", json.object([("kind", json.from_string("list"))])),
+  let bad = value.object([
+    ("name", value.string("sum")),
+    ("params", value.array([
+      value.object([
+        ("name", value.string("xs")),
+        ("type", value.object([("kind", value.string("list"))])),
       ]),
     ])),
-    ("return", json.object([("kind", json.from_string("int"))])),
+    ("return", value.object([("kind", value.string("int"))])),
   ])
   assert(not wasm_bindgen.is_supported_fn(bad))
 }
 
 test "is_supported_fn accepts List[Int]" {
-  let fn_val = json.object([
-    ("name", json.from_string("sum")),
-    ("params", json.array([
-      json.object([
-        ("name", json.from_string("xs")),
-        ("type", json.object([
-          ("kind", json.from_string("list")),
-          ("inner", json.object([("kind", json.from_string("int"))])),
+  let fn_val = value.object([
+    ("name", value.string("sum")),
+    ("params", value.array([
+      value.object([
+        ("name", value.string("xs")),
+        ("type", value.object([
+          ("kind", value.string("list")),
+          ("inner", value.object([("kind", value.string("int"))])),
         ])),
       ]),
     ])),
-    ("return", json.object([("kind", json.from_string("int"))])),
+    ("return", value.object([("kind", value.string("int"))])),
   ])
   assert(wasm_bindgen.is_supported_fn(fn_val))
 }
@@ -203,17 +203,17 @@ test "is_supported_fn accepts List[Int]" {
 // List[Int] marshalling
 // ═══════════════════════════════════════════════════════
 test "to_wasm dispatches List[Int] to _writeListInt" {
-  let ty = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.to_wasm(ty, "xs"), "_writeListInt(xs)")
 }
 
 test "from_wasm dispatches List[Int] to _readListInt" {
-  let ty = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readListInt(p)")
 }
@@ -243,13 +243,13 @@ test "generate_esm wraps List[Int] arg and result" {
 }
 
 test "to_wasm dispatches List[Float] / List[Bool]" {
-  let list_float = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("float"))])),
+  let list_float = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("float"))])),
   ]);
-  let list_bool = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("bool"))])),
+  let list_bool = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("bool"))])),
   ]);
   assert_eq(wasm_bindgen.to_wasm(list_float, "xs"), "_writeListFloat(xs)")
   assert_eq(wasm_bindgen.to_wasm(list_bool, "xs"), "_writeListBool(xs)")
@@ -278,9 +278,9 @@ test "generate_dts emits boolean[] and number[] for list variants" {
 }
 
 test "to_wasm / from_wasm dispatch List[String]" {
-  let ty = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("string"))])),
+  let ty = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.to_wasm(ty, "xs"), "_writeListString(xs)")
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readListString(p)")
@@ -305,29 +305,29 @@ test "generate_esm includes List[String] helpers" {
 // Option[T] marshalling
 // ═══════════════════════════════════════════════════════
 test "ts_type maps Option[Int] to number | null" {
-  let ty = json.object([
-    ("kind", json.from_string("option")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("option")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.ts_type(ty), "number | null")
 }
 
 test "ts_type maps Option[String] to string | null" {
-  let ty = json.object([
-    ("kind", json.from_string("option")),
-    ("inner", json.object([("kind", json.from_string("string"))])),
+  let ty = value.object([
+    ("kind", value.string("option")),
+    ("inner", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.ts_type(ty), "string | null")
 }
 
 test "to_wasm / from_wasm dispatch Option[Int] / Option[String]" {
-  let opt_int = json.object([
-    ("kind", json.from_string("option")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let opt_int = value.object([
+    ("kind", value.string("option")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
-  let opt_str = json.object([
-    ("kind", json.from_string("option")),
-    ("inner", json.object([("kind", json.from_string("string"))])),
+  let opt_str = value.object([
+    ("kind", value.string("option")),
+    ("inner", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.to_wasm(opt_int, "v"), "_writeOptionInt(v)")
   assert_eq(wasm_bindgen.to_wasm(opt_str, "v"), "_writeOptionString(v)")
@@ -355,17 +355,17 @@ test "generate_esm includes all Option helpers" {
 }
 
 test "is_supported_fn accepts Option[Int] return" {
-  let fn_val = json.object([
-    ("name", json.from_string("try_halve")),
-    ("params", json.array([
-      json.object([
-        ("name", json.from_string("n")),
-        ("type", json.object([("kind", json.from_string("int"))])),
+  let fn_val = value.object([
+    ("name", value.string("try_halve")),
+    ("params", value.array([
+      value.object([
+        ("name", value.string("n")),
+        ("type", value.object([("kind", value.string("int"))])),
       ]),
     ])),
-    ("return", json.object([
-      ("kind", json.from_string("option")),
-      ("inner", json.object([("kind", json.from_string("int"))])),
+    ("return", value.object([
+      ("kind", value.string("option")),
+      ("inner", value.object([("kind", value.string("int"))])),
     ])),
   ])
   assert(wasm_bindgen.is_supported_fn(fn_val))
@@ -375,28 +375,28 @@ test "is_supported_fn accepts Option[Int] return" {
 // Result[T, E] marshalling
 // ═══════════════════════════════════════════════════════
 test "ts_type erases Result to Ok type (Err throws)" {
-  let r_int_str = json.object([
-    ("kind", json.from_string("result")),
-    ("ok",  json.object([("kind", json.from_string("int"))])),
-    ("err", json.object([("kind", json.from_string("string"))])),
+  let r_int_str = value.object([
+    ("kind", value.string("result")),
+    ("ok",  value.object([("kind", value.string("int"))])),
+    ("err", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.ts_type(r_int_str), "number")
 }
 
 test "from_wasm dispatches Result[Int, String]" {
-  let ty = json.object([
-    ("kind", json.from_string("result")),
-    ("ok",  json.object([("kind", json.from_string("int"))])),
-    ("err", json.object([("kind", json.from_string("string"))])),
+  let ty = value.object([
+    ("kind", value.string("result")),
+    ("ok",  value.object([("kind", value.string("int"))])),
+    ("err", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readResultIntString(p)")
 }
 
 test "from_wasm Result with non-String err is rejected" {
-  let ty = json.object([
-    ("kind", json.from_string("result")),
-    ("ok",  json.object([("kind", json.from_string("int"))])),
-    ("err", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("result")),
+    ("ok",  value.object([("kind", value.string("int"))])),
+    ("err", value.object([("kind", value.string("int"))])),
   ]);
   let out = wasm_bindgen.from_wasm(ty, "p")
   assert(string.contains(out, "unsupported"))
@@ -424,22 +424,22 @@ test "generate_esm includes Result helpers" {
 }
 
 test "is_supported_fn accepts Result[Int, String] return" {
-  let fn_val = json.object([
-    ("name", json.from_string("safe_div")),
-    ("params", json.array([
-      json.object([
-        ("name", json.from_string("a")),
-        ("type", json.object([("kind", json.from_string("int"))])),
+  let fn_val = value.object([
+    ("name", value.string("safe_div")),
+    ("params", value.array([
+      value.object([
+        ("name", value.string("a")),
+        ("type", value.object([("kind", value.string("int"))])),
       ]),
-      json.object([
-        ("name", json.from_string("b")),
-        ("type", json.object([("kind", json.from_string("int"))])),
+      value.object([
+        ("name", value.string("b")),
+        ("type", value.object([("kind", value.string("int"))])),
       ]),
     ])),
-    ("return", json.object([
-      ("kind", json.from_string("result")),
-      ("ok",  json.object([("kind", json.from_string("int"))])),
-      ("err", json.object([("kind", json.from_string("string"))])),
+    ("return", value.object([
+      ("kind", value.string("result")),
+      ("ok",  value.object([("kind", value.string("int"))])),
+      ("err", value.object([("kind", value.string("string"))])),
     ])),
   ])
   assert(wasm_bindgen.is_supported_fn(fn_val))
@@ -449,24 +449,24 @@ test "is_supported_fn accepts Result[Int, String] return" {
 // effect fn auto-wrap (Result at ABI, T on JS surface)
 // ═══════════════════════════════════════════════════════
 test "effective_return wraps effect fn return as Result" {
-  let eff_fn = json.object([
-    ("name", json.from_string("read_config")),
-    ("params", json.array([])),
-    ("return", json.object([("kind", json.from_string("string"))])),
-    ("effect", json.from_bool(true)),
-    ("error", json.object([("kind", json.from_string("string"))])),
+  let eff_fn = value.object([
+    ("name", value.string("read_config")),
+    ("params", value.array([])),
+    ("return", value.object([("kind", value.string("string"))])),
+    ("effect", value.bool(true)),
+    ("error", value.object([("kind", value.string("string"))])),
   ]);
   let eff_ret = wasm_bindgen.effective_return(eff_fn)
   assert_eq(wasm_bindgen.get_kind(eff_ret), "result")
-  assert_eq(wasm_bindgen.get_kind(json.get(eff_ret, "ok") ?? json.null()), "string")
-  assert_eq(wasm_bindgen.get_kind(json.get(eff_ret, "err") ?? json.null()), "string")
+  assert_eq(wasm_bindgen.get_kind(value.get(eff_ret, "ok") ?? value.null()), "string")
+  assert_eq(wasm_bindgen.get_kind(value.get(eff_ret, "err") ?? value.null()), "string")
 }
 
 test "effective_return leaves pure fn return unchanged" {
-  let pure_fn = json.object([
-    ("name", json.from_string("pure_add")),
-    ("params", json.array([])),
-    ("return", json.object([("kind", json.from_string("int"))])),
+  let pure_fn = value.object([
+    ("name", value.string("pure_add")),
+    ("params", value.array([])),
+    ("return", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.get_kind(wasm_bindgen.effective_return(pure_fn)), "int")
 }
@@ -513,17 +513,17 @@ test "generate_esm wraps effect fn with Unit return" {
 // Record types
 // ═══════════════════════════════════════════════════════
 test "ts_type maps named to the type name" {
-  let ty = json.object([
-    ("kind", json.from_string("named")),
-    ("name", json.from_string("Point")),
+  let ty = value.object([
+    ("kind", value.string("named")),
+    ("name", value.string("Point")),
   ]);
   assert_eq(wasm_bindgen.ts_type(ty), "Point")
 }
 
 test "to_wasm / from_wasm dispatch named to _writeX / _readX" {
-  let ty = json.object([
-    ("kind", json.from_string("named")),
-    ("name", json.from_string("Point")),
+  let ty = value.object([
+    ("kind", value.string("named")),
+    ("name", value.string("Point")),
   ]);
   assert_eq(wasm_bindgen.to_wasm(ty, "p"), "_writePoint(p)")
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readPoint(p)")
@@ -583,11 +583,11 @@ test "generate_dts skips records not referenced by any fn" {
 }
 
 test "ts_type parenthesizes union when wrapped in list" {
-  let ty = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([
-      ("kind", json.from_string("option")),
-      ("inner", json.object([("kind", json.from_string("int"))])),
+  let ty = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([
+      ("kind", value.string("option")),
+      ("inner", value.object([("kind", value.string("int"))])),
     ])),
   ])
   assert_eq(wasm_bindgen.ts_type(ty), "(number | null)[]")
@@ -634,16 +634,16 @@ test "generate_esm emits _writeX / _readX for variant with tag dispatch" {
 }
 
 test "variant_supported rejects variant with compound payload" {
-  let tdef = json.object([
-    ("name", json.from_string("Bad")),
-    ("kind", json.object([
-      ("kind", json.from_string("variant")),
-      ("cases", json.array([
-        json.object([
-          ("name", json.from_string("C")),
-          ("payload", json.object([
-            ("kind", json.from_string("tuple")),
-            ("fields", json.array([json.object([("kind", json.from_string("list"))])])),
+  let tdef = value.object([
+    ("name", value.string("Bad")),
+    ("kind", value.object([
+      ("kind", value.string("variant")),
+      ("cases", value.array([
+        value.object([
+          ("name", value.string("C")),
+          ("payload", value.object([
+            ("kind", value.string("tuple")),
+            ("fields", value.array([value.object([("kind", value.string("list"))])])),
           ])),
         ]),
       ])),
@@ -656,12 +656,12 @@ test "variant_supported rejects variant with compound payload" {
 // Matrix (zero-copy Float64Array view)
 // ═══════════════════════════════════════════════════════
 test "ts_type matrix maps to Matrix interface name" {
-  let ty = json.object([("kind", json.from_string("matrix"))]);
+  let ty = value.object([("kind", value.string("matrix"))]);
   assert_eq(wasm_bindgen.ts_type(ty), "Matrix")
 }
 
 test "to_wasm / from_wasm dispatch matrix" {
-  let ty = json.object([("kind", json.from_string("matrix"))]);
+  let ty = value.object([("kind", value.string("matrix"))]);
   assert_eq(wasm_bindgen.to_wasm(ty, "m"), "_writeMatrix(m)")
   assert_eq(wasm_bindgen.from_wasm(ty, "p"), "_readMatrix(p)")
 }
@@ -892,19 +892,19 @@ test "generate_dts emits @throws hint for effect fn" {
 }
 
 test "almide_type_str renders compounds" {
-  let list_int = json.object([
-    ("kind", json.from_string("list")),
-    ("inner", json.object([("kind", json.from_string("int"))])),
+  let list_int = value.object([
+    ("kind", value.string("list")),
+    ("inner", value.object([("kind", value.string("int"))])),
   ]);
   assert_eq(wasm_bindgen.almide_type_str(list_int), "List[Int]")
-  let opt_str = json.object([
-    ("kind", json.from_string("option")),
-    ("inner", json.object([("kind", json.from_string("string"))])),
+  let opt_str = value.object([
+    ("kind", value.string("option")),
+    ("inner", value.object([("kind", value.string("string"))])),
   ]);
   assert_eq(wasm_bindgen.almide_type_str(opt_str), "Option[String]")
-  let named = json.object([
-    ("kind", json.from_string("named")),
-    ("name", json.from_string("Point")),
+  let named = value.object([
+    ("kind", value.string("named")),
+    ("name", value.string("Point")),
   ]);
   assert_eq(wasm_bindgen.almide_type_str(named), "Point")
 }
