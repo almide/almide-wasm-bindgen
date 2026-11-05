@@ -15,14 +15,14 @@ import json
 // ── Shared JSON helpers ──
 
 fn get_str(v: Value, key: String) -> String =
-  json.as_string(json.get(v, key) ?? json.from_string("")) ?? ""
+  value.as_string(value.get(v, key) ?? value.string(""))? ?? ""
 
 fn get_arr(v: Value, key: String) -> List[Value] =
-  json.as_array(json.get(v, key) ?? json.array([])) ?? []
+  value.as_array(value.get(v, key) ?? value.array([]))? ?? []
 
 fn get_kind(v: Value) -> String = get_str(v, "kind")
 
-fn get_type(v: Value) -> Value = json.get(v, "type") ?? json.null()
+fn get_type(v: Value) -> Value = value.get(v, "type") ?? value.null()
 
 // Render an Almide-style type expression (uses Capitalized names like
 // `Int`, `List[Int]`, `Option[String]`, `Result[T, E]`, `Matrix`, named).
@@ -33,9 +33,9 @@ fn almide_type_str(ty: Value) -> String = match get_kind(ty) {
   "string" => "String",
   "unit"   => "()",
   "matrix" => "Matrix",
-  "list"   => "List[${almide_type_str(json.get(ty, "inner") ?? json.null())}]",
-  "option" => "Option[${almide_type_str(json.get(ty, "inner") ?? json.null())}]",
-  "result" => "Result[${almide_type_str(json.get(ty, "ok") ?? json.null())}, ${almide_type_str(json.get(ty, "err") ?? json.null())}]",
+  "list"   => "List[${almide_type_str(value.get(ty, "inner") ?? value.null())}]",
+  "option" => "Option[${almide_type_str(value.get(ty, "inner") ?? value.null())}]",
+  "result" => "Result[${almide_type_str(value.get(ty, "ok") ?? value.null())}, ${almide_type_str(value.get(ty, "err") ?? value.null())}]",
   "named"  => get_str(ty, "name"),
   _        => "Unknown",
 }
@@ -44,12 +44,12 @@ fn almide_type_str(ty: Value) -> String = match get_kind(ty) {
 fn almide_fn_signature(fn_val: Value) -> String = {
   let name = get_str(fn_val, "name")
   let params = get_arr(fn_val, "params")
-  let is_effect = json.as_bool(json.get(fn_val, "effect") ?? json.from_bool(false)) ?? false
+  let is_effect = value.as_bool(value.get(fn_val, "effect") ?? value.bool(false))? ?? false
   let kw = if is_effect then "effect fn" else "fn"
   let params_str = params
     |> list.map((p) => "${get_str(p, "name")}: ${almide_type_str(get_type(p))}")
     |> list.join(", ")
-  let ret_str = almide_type_str(json.get(fn_val, "return") ?? json.null())
+  let ret_str = almide_type_str(value.get(fn_val, "return") ?? value.null())
   "${kw} ${name}(${params_str}) -> ${ret_str}"
 }
 
@@ -60,18 +60,18 @@ fn almide_fn_signature(fn_val: Value) -> String = {
 // return type `T` is wrapped in a Result pointer so the caller can observe
 // error propagation. On the JS surface it unwraps back to T via throw/return.
 fn effective_return(fn_val: Value) -> Value = {
-  let is_effect = json.as_bool(json.get(fn_val, "effect") ?? json.from_bool(false)) ?? false
+  let is_effect = value.as_bool(value.get(fn_val, "effect") ?? value.bool(false))? ?? false
   if is_effect then {
-    let ok_ty = json.get(fn_val, "return") ?? json.null()
-    let default_err = json.object([("kind", json.from_string("string"))])
-    let err_ty = json.get(fn_val, "error") ?? default_err
-    json.object([
-      ("kind", json.from_string("result")),
+    let ok_ty = value.get(fn_val, "return") ?? value.null()
+    let default_err = value.object([("kind", value.string("string"))])
+    let err_ty = value.get(fn_val, "error") ?? default_err
+    value.object([
+      ("kind", value.string("result")),
       ("ok", ok_ty),
       ("err", err_ty),
     ])
   } else {
-    json.get(fn_val, "return") ?? json.null()
+    value.get(fn_val, "return") ?? value.null()
   }
 }
 
@@ -83,13 +83,13 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
   "bool"   => true,
   "string" => true,
   "unit"   => true,
-  "list"   => list_inner_supported(json.get(ty, "inner") ?? json.null()),
-  "option" => option_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "list"   => list_inner_supported(value.get(ty, "inner") ?? value.null()),
+  "option" => option_inner_supported(value.get(ty, "inner") ?? value.null()),
   // v0.2 scope: Result is return-only. Params typed Result are a rare case
   // and are emitted with a /* unsupported */ stub in to_wasm if reached.
   "result" => result_supported(
-    json.get(ty, "ok") ?? json.null(),
-    json.get(ty, "err") ?? json.null()
+    value.get(ty, "ok") ?? value.null(),
+    value.get(ty, "err") ?? value.null()
   ),
   // Named refers to a user-defined record/variant. Trust that generate_esm /
   // generate_dts will emit helpers for it; field-level validation happens
@@ -98,11 +98,11 @@ fn is_supported_ty(ty: Value) -> Bool = match get_kind(ty) {
   "matrix" => true,
   "tuple"  => tuple_supported(ty),
   "map"    => {
-    let k = json.get(ty, "key") ?? json.null()
-    let v = json.get(ty, "value") ?? json.null()
+    let k = value.get(ty, "key") ?? value.null()
+    let v = value.get(ty, "value") ?? value.null()
     map_key_supported(k) and map_value_supported(v)
   },
-  "set"    => set_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "set"    => set_inner_supported(value.get(ty, "inner") ?? value.null()),
   "bytes"  => true,
   _        => false,
 }
@@ -145,8 +145,8 @@ fn type_sig(ty: Value) -> String = match get_kind(ty) {
   "bool"   => "B",
   "string" => "S",
   "named"  => "N${get_str(ty, "name")}",
-  "list"   => "L${type_sig(json.get(ty, "inner") ?? json.null())}",
-  "option" => "O${type_sig(json.get(ty, "inner") ?? json.null())}",
+  "list"   => "L${type_sig(value.get(ty, "inner") ?? value.null())}",
+  "option" => "O${type_sig(value.get(ty, "inner") ?? value.null())}",
   "matrix" => "M",
   "bytes"  => "Y",
   _        => "X",
@@ -203,8 +203,8 @@ fn record_field_ty_supported(ty: Value) -> Bool = match get_kind(ty) {
   "string" => true,
   "named"  => true,
   "matrix" => true,
-  "list"   => list_inner_supported(json.get(ty, "inner") ?? json.null()),
-  "option" => option_inner_supported(json.get(ty, "inner") ?? json.null()),
+  "list"   => list_inner_supported(value.get(ty, "inner") ?? value.null()),
+  "option" => option_inner_supported(value.get(ty, "inner") ?? value.null()),
   _        => false,
 }
 
@@ -267,14 +267,14 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
   "string" => "string",
   "unit"   => "void",
   "list"   => {
-    let inner = ts_type(json.get(ty, "inner") ?? json.null())
+    let inner = ts_type(value.get(ty, "inner") ?? value.null())
     // Parenthesize union / intersection inners so `T | null` inside a list
     // becomes `(T | null)[]` not `T | null[]`.
     if string.contains(inner, " ") then "(${inner})[]" else "${inner}[]"
   },
-  "option" => "${ts_type(json.get(ty, "inner") ?? json.null())} | null",
+  "option" => "${ts_type(value.get(ty, "inner") ?? value.null())} | null",
   // Result[T, E] → T on JS surface (Err is thrown, so the static type is T).
-  "result" => ts_type(json.get(ty, "ok") ?? json.null()),
+  "result" => ts_type(value.get(ty, "ok") ?? value.null()),
   // Named record/variant → use the type name directly. TS interface is
   // emitted separately at the top of the .d.ts from iface.types[].
   "named"  => get_str(ty, "name"),
@@ -288,11 +288,11 @@ fn ts_type(ty: Value) -> String = match get_kind(ty) {
     "[${parts}]"
   },
   "map" => {
-    let k = ts_type(json.get(ty, "key") ?? json.null())
-    let v = ts_type(json.get(ty, "value") ?? json.null())
+    let k = ts_type(value.get(ty, "key") ?? value.null())
+    let v = ts_type(value.get(ty, "value") ?? value.null())
     "Map<${k}, ${v}>"
   },
-  "set" => "Set<${ts_type(json.get(ty, "inner") ?? json.null())}>",
+  "set" => "Set<${ts_type(value.get(ty, "inner") ?? value.null())}>",
   "bytes" => "Uint8Array",
   _        => "unknown",
 }
@@ -307,17 +307,17 @@ fn to_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "bool"   => "(${expr} ? 1 : 0)",
   "string" => "_writeString(${expr})",
   "unit"   => "",
-  "list"   => list_to_wasm(json.get(ty, "inner") ?? json.null(), expr),
-  "option" => option_to_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "list"   => list_to_wasm(value.get(ty, "inner") ?? value.null(), expr),
+  "option" => option_to_wasm(value.get(ty, "inner") ?? value.null(), expr),
   "named"  => "_write${get_str(ty, "name")}(${expr})",
   "matrix" => "_writeMatrix(${expr})",
   "tuple"  => "_writeTuple_${tuple_sig(ty)}(${expr})",
   "map"    => {
-    let k = json.get(ty, "key") ?? json.null()
-    let v = json.get(ty, "value") ?? json.null()
+    let k = value.get(ty, "key") ?? value.null()
+    let v = value.get(ty, "value") ?? value.null()
     "_writeMap_${type_sig(k)}_${type_sig(v)}(${expr})"
   },
-  "set"    => "_writeSet_${type_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "set"    => "_writeSet_${type_sig(value.get(ty, "inner") ?? value.null())}(${expr})",
   "bytes"  => "_writeBytes(${expr})",
   _        => expr,
 }
@@ -328,22 +328,22 @@ fn from_wasm(ty: Value, expr: String) -> String = match get_kind(ty) {
   "bool"   => "(${expr} !== 0)",
   "string" => "_readString(${expr})",
   "unit"   => "undefined",
-  "list"   => list_from_wasm(json.get(ty, "inner") ?? json.null(), expr),
-  "option" => option_from_wasm(json.get(ty, "inner") ?? json.null(), expr),
+  "list"   => list_from_wasm(value.get(ty, "inner") ?? value.null(), expr),
+  "option" => option_from_wasm(value.get(ty, "inner") ?? value.null(), expr),
   "result" => result_from_wasm(
-    json.get(ty, "ok") ?? json.null(),
-    json.get(ty, "err") ?? json.null(),
+    value.get(ty, "ok") ?? value.null(),
+    value.get(ty, "err") ?? value.null(),
     expr
   ),
   "named"  => "_read${get_str(ty, "name")}(${expr})",
   "matrix" => "_readMatrix(${expr})",
   "tuple"  => "_readTuple_${tuple_sig(ty)}(${expr})",
   "map"    => {
-    let k = json.get(ty, "key") ?? json.null()
-    let v = json.get(ty, "value") ?? json.null()
+    let k = value.get(ty, "key") ?? value.null()
+    let v = value.get(ty, "value") ?? value.null()
     "_readMap_${type_sig(k)}_${type_sig(v)}(${expr})"
   },
-  "set"    => "_readSet_${type_sig(json.get(ty, "inner") ?? json.null())}(${expr})",
+  "set"    => "_readSet_${type_sig(value.get(ty, "inner") ?? value.null())}(${expr})",
   "bytes"  => "_readBytes(${expr})",
   _        => expr,
 }
@@ -452,11 +452,11 @@ fn wasm_record_offsets(fields: List[Value]) -> List[Int] = {
 // (FileStat, ProcessStatus, ...) out of the generated .d.ts.
 fn collect_named_in_ty(ty: Value) -> List[String] = match get_kind(ty) {
   "named"  => [get_str(ty, "name")],
-  "list"   => collect_named_in_ty(json.get(ty, "inner") ?? json.null()),
-  "option" => collect_named_in_ty(json.get(ty, "inner") ?? json.null()),
+  "list"   => collect_named_in_ty(value.get(ty, "inner") ?? value.null()),
+  "option" => collect_named_in_ty(value.get(ty, "inner") ?? value.null()),
   "result" => {
-    let ok_names = collect_named_in_ty(json.get(ty, "ok") ?? json.null())
-    let err_names = collect_named_in_ty(json.get(ty, "err") ?? json.null())
+    let ok_names = collect_named_in_ty(value.get(ty, "ok") ?? value.null())
+    let err_names = collect_named_in_ty(value.get(ty, "err") ?? value.null())
     ok_names + err_names
   },
   "tuple" => {
@@ -471,11 +471,11 @@ fn collect_named_in_ty(ty: Value) -> List[String] = match get_kind(ty) {
 // read `elements`. Dedup by `tuple_sig` at the caller.
 fn collect_tuples_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
   "tuple"  => [ty],
-  "list"   => collect_tuples_in_ty(json.get(ty, "inner") ?? json.null()),
-  "option" => collect_tuples_in_ty(json.get(ty, "inner") ?? json.null()),
+  "list"   => collect_tuples_in_ty(value.get(ty, "inner") ?? value.null()),
+  "option" => collect_tuples_in_ty(value.get(ty, "inner") ?? value.null()),
   "result" => {
-    let ok_ts = collect_tuples_in_ty(json.get(ty, "ok") ?? json.null())
-    let err_ts = collect_tuples_in_ty(json.get(ty, "err") ?? json.null())
+    let ok_ts = collect_tuples_in_ty(value.get(ty, "ok") ?? value.null())
+    let err_ts = collect_tuples_in_ty(value.get(ty, "err") ?? value.null())
     ok_ts + err_ts
   },
   _ => [],
@@ -491,15 +491,15 @@ fn collect_tuples_in_fn(fn_val: Value) -> List[Value] = {
 // Does this type use `Matrix`? Walks compound types recursively.
 fn ty_uses_matrix(ty: Value) -> Bool = match get_kind(ty) {
   "matrix" => true,
-  "list"   => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
-  "option" => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
+  "list"   => ty_uses_matrix(value.get(ty, "inner") ?? value.null()),
+  "option" => ty_uses_matrix(value.get(ty, "inner") ?? value.null()),
   "result" => {
-    let ok_ty = json.get(ty, "ok") ?? json.null()
-    let err_ty = json.get(ty, "err") ?? json.null()
+    let ok_ty = value.get(ty, "ok") ?? value.null()
+    let err_ty = value.get(ty, "err") ?? value.null()
     ty_uses_matrix(ok_ty) or ty_uses_matrix(err_ty)
   },
-  "map" => ty_uses_matrix(json.get(ty, "value") ?? json.null()),
-  "set" => ty_uses_matrix(json.get(ty, "inner") ?? json.null()),
+  "map" => ty_uses_matrix(value.get(ty, "value") ?? value.null()),
+  "set" => ty_uses_matrix(value.get(ty, "inner") ?? value.null()),
   "tuple" => {
     let elems = get_arr(ty, "elements")
     elems |> list.fold(false, (acc, e) => acc or ty_uses_matrix(e))
@@ -511,12 +511,12 @@ fn ty_uses_matrix(ty: Value) -> Bool = match get_kind(ty) {
 // fixed _writeBytes/_readBytes helper pair needs emitting.
 fn bytes_appears_in(ty: Value) -> Bool = match get_kind(ty) {
   "bytes"  => true,
-  "list"   => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
-  "option" => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
-  "result" => bytes_appears_in(json.get(ty, "ok") ?? json.null())
-              or bytes_appears_in(json.get(ty, "err") ?? json.null()),
-  "map"    => bytes_appears_in(json.get(ty, "value") ?? json.null()),
-  "set"    => bytes_appears_in(json.get(ty, "inner") ?? json.null()),
+  "list"   => bytes_appears_in(value.get(ty, "inner") ?? value.null()),
+  "option" => bytes_appears_in(value.get(ty, "inner") ?? value.null()),
+  "result" => bytes_appears_in(value.get(ty, "ok") ?? value.null())
+              or bytes_appears_in(value.get(ty, "err") ?? value.null()),
+  "map"    => bytes_appears_in(value.get(ty, "value") ?? value.null()),
+  "set"    => bytes_appears_in(value.get(ty, "inner") ?? value.null()),
   "tuple"  => {
     let elems = get_arr(ty, "elements")
     elems |> list.fold(false, (acc, e) => acc or bytes_appears_in(e))
@@ -545,7 +545,7 @@ fn expand_named_deps(names: List[String], types: List[Value]) -> List[String] = 
     let def = types |> list.find((t) => get_str(t, "name") == name)
     match def {
       some(d) => {
-        let kind_rec = json.get(d, "kind") ?? json.null()
+        let kind_rec = value.get(d, "kind") ?? value.null()
         let fields = get_arr(kind_rec, "fields")
         let inner = fields |> list.flat_map((f) => collect_named_in_ty(get_type(f)))
         [name] + inner
@@ -566,7 +566,7 @@ fn expand_named_deps(names: List[String], types: List[Value]) -> List[String] = 
 // with unit cases carrying just `{ tag: 'CaseName' }`.
 
 fn variant_case_fields(case_def: Value) -> List[Value] = {
-  let payload = json.get(case_def, "payload") ?? json.null()
+  let payload = value.get(case_def, "payload") ?? value.null()
   if get_kind(payload) == "tuple" then get_arr(payload, "fields") else []
 }
 
@@ -590,7 +590,7 @@ fn variant_case_fields_supported(case_def: Value) -> Bool = {
 }
 
 fn variant_supported(type_def: Value) -> Bool = {
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   if get_kind(kind_rec) != "variant" then false
   else {
     let cases = get_arr(kind_rec, "cases")
@@ -601,7 +601,7 @@ fn variant_supported(type_def: Value) -> Bool = {
 // Emit a TS discriminated union declaration.
 fn emit_variant_type(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let cases = get_arr(kind_rec, "cases")
   let case_lines = cases |> list.map((c) => {
     let cname = get_str(c, "name")
@@ -622,7 +622,7 @@ fn emit_variant_type(type_def: Value) -> List[String] = {
 // Emit JS `_writeX` / `_readX` for a variant type.
 fn emit_variant_helpers(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let cases = get_arr(kind_rec, "cases")
   let size = int.to_string(variant_alloc_size(cases))
 
@@ -714,7 +714,7 @@ fn emit_variant_helpers(type_def: Value) -> List[String] = {
 
 // Predicate: is this Record fully marshallable under v0.2 scope?
 fn record_supported(type_def: Value) -> Bool = {
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   if get_kind(kind_rec) != "record" then false
   else {
     let fields = get_arr(kind_rec, "fields")
@@ -730,7 +730,7 @@ fn record_supported(type_def: Value) -> Bool = {
 // (before outer __alloc) so memory grow does not invalidate in-flight writes.
 fn emit_record_helpers(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let fields = get_arr(kind_rec, "fields")
   // NOTE: iface.types[].abi is the Rust repr-c layout (for the native FFI
   // target) and does NOT match WASM layout. We compute our own offsets using
@@ -928,8 +928,8 @@ fn prim_read_line(ty: Value, src_off: String) -> String = match get_kind(ty) {
 // are written in a pre-allocation phase so their nested writes cannot detach
 // the outer DataView via WASM memory grow.
 fn emit_map_helpers(ty: Value) -> List[String] = {
-  let k = json.get(ty, "key") ?? json.null()
-  let v = json.get(ty, "value") ?? json.null()
+  let k = value.get(ty, "key") ?? value.null()
+  let v = value.get(ty, "value") ?? value.null()
   let sig = "${type_sig(k)}_${type_sig(v)}"
   let k_size = wasm_byte_size(k)
   let v_size = wasm_byte_size(v)
@@ -991,7 +991,7 @@ fn emit_map_helpers(ty: Value) -> List[String] = {
 }
 
 fn emit_set_helpers(ty: Value) -> List[String] = {
-  let e = json.get(ty, "inner") ?? json.null()
+  let e = value.get(ty, "inner") ?? value.null()
   let sig = type_sig(e)
   let e_size = wasm_byte_size(e)
   let elem_pre_expr = match get_kind(e) {
@@ -1034,11 +1034,11 @@ fn emit_set_helpers(ty: Value) -> List[String] = {
 // Collect all distinct map/set signatures used by supported fns.
 fn collect_maps_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
   "map"    => [ty],
-  "list"   => collect_maps_in_ty(json.get(ty, "inner") ?? json.null()),
-  "option" => collect_maps_in_ty(json.get(ty, "inner") ?? json.null()),
+  "list"   => collect_maps_in_ty(value.get(ty, "inner") ?? value.null()),
+  "option" => collect_maps_in_ty(value.get(ty, "inner") ?? value.null()),
   "result" => {
-    let a = collect_maps_in_ty(json.get(ty, "ok") ?? json.null())
-    let b = collect_maps_in_ty(json.get(ty, "err") ?? json.null())
+    let a = collect_maps_in_ty(value.get(ty, "ok") ?? value.null())
+    let b = collect_maps_in_ty(value.get(ty, "err") ?? value.null())
     a + b
   },
   _ => [],
@@ -1046,11 +1046,11 @@ fn collect_maps_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
 
 fn collect_sets_in_ty(ty: Value) -> List[Value] = match get_kind(ty) {
   "set"    => [ty],
-  "list"   => collect_sets_in_ty(json.get(ty, "inner") ?? json.null()),
-  "option" => collect_sets_in_ty(json.get(ty, "inner") ?? json.null()),
+  "list"   => collect_sets_in_ty(value.get(ty, "inner") ?? value.null()),
+  "option" => collect_sets_in_ty(value.get(ty, "inner") ?? value.null()),
   "result" => {
-    let a = collect_sets_in_ty(json.get(ty, "ok") ?? json.null())
-    let b = collect_sets_in_ty(json.get(ty, "err") ?? json.null())
+    let a = collect_sets_in_ty(value.get(ty, "ok") ?? value.null())
+    let b = collect_sets_in_ty(value.get(ty, "err") ?? value.null())
     a + b
   },
   _ => [],
@@ -1071,7 +1071,7 @@ fn collect_sets_in_fn(fn_val: Value) -> List[Value] = {
 // Emit a TS interface declaration for a record type.
 fn emit_record_interface(type_def: Value) -> List[String] = {
   let name = get_str(type_def, "name")
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let fields = get_arr(kind_rec, "fields")
   let field_lines = fields |> list.map((f) =>
     "  ${get_str(f, "name")}: ${ts_type(get_type(f))};"
@@ -1099,11 +1099,11 @@ fn wit_type(ty: Value) -> String = match get_kind(ty) {
   "bool"   => "bool",
   "string" => "string",
   "unit"   => "",
-  "list"   => "list<${wit_type(json.get(ty, "inner") ?? json.null())}>",
-  "option" => "option<${wit_type(json.get(ty, "inner") ?? json.null())}>",
+  "list"   => "list<${wit_type(value.get(ty, "inner") ?? value.null())}>",
+  "option" => "option<${wit_type(value.get(ty, "inner") ?? value.null())}>",
   "result" => {
-    let ok_t = wit_type(json.get(ty, "ok") ?? json.null())
-    let err_t = wit_type(json.get(ty, "err") ?? json.null())
+    let ok_t = wit_type(value.get(ty, "ok") ?? value.null())
+    let err_t = wit_type(value.get(ty, "err") ?? value.null())
     if ok_t == "" then "result<_, ${err_t}>"
     else "result<${ok_t}, ${err_t}>"
   },
@@ -1116,7 +1116,7 @@ fn wit_type(ty: Value) -> String = match get_kind(ty) {
 
 // Convert a CamelCase / snake_case Almide name to kebab-case for WIT.
 fn wit_ident(name: String) -> String = string.to_lower(
-  string.chars(name)
+  string.to_list(name)
     |> list.enumerate
     |> list.map((entry) => {
       let (i, c) = entry
@@ -1131,7 +1131,7 @@ fn wit_ident(name: String) -> String = string.to_lower(
 // Emit a WIT `record` declaration for a record type.
 fn wit_emit_record(type_def: Value) -> List[String] = {
   let name = wit_ident(get_str(type_def, "name"))
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let fields = get_arr(kind_rec, "fields")
   let field_lines = fields |> list.map((f) =>
     "    ${wit_ident(get_str(f, "name"))}: ${wit_type(get_type(f))},"
@@ -1142,13 +1142,13 @@ fn wit_emit_record(type_def: Value) -> List[String] = {
 // Emit a WIT `variant` declaration.
 fn wit_emit_variant(type_def: Value) -> List[String] = {
   let name = wit_ident(get_str(type_def, "name"))
-  let kind_rec = json.get(type_def, "kind") ?? json.null()
+  let kind_rec = value.get(type_def, "kind") ?? value.null()
   let cases = get_arr(kind_rec, "cases")
   let case_lines = cases |> list.map((c) => {
     let cname = wit_ident(get_str(c, "name"))
     let fields = variant_case_fields(c)
     if list.is_empty(fields) then "    ${cname},"
-    else if list.len(fields) == 1 then "    ${cname}(${wit_type(list.get(fields, 0) ?? json.null())}),"
+    else if list.len(fields) == 1 then "    ${cname}(${wit_type(list.get(fields, 0) ?? value.null())}),"
     else {
       let inner = fields |> list.map((f) => wit_type(f)) |> list.join(", ")
       "    ${cname}(tuple<${inner}>),"
@@ -1170,7 +1170,7 @@ fn wit_emit_fn(fn_val: Value) -> String = {
 }
 
 fn generate_wit(iface_json: String, module_name: String) -> String = {
-  let iface = json.parse(iface_json) ?? json.null()
+  let iface = json.parse(iface_json) ?? value.null()
   let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
   let supported = fns |> list.filter((f) => is_supported_fn(f))
@@ -1202,12 +1202,12 @@ fn generate_wit(iface_json: String, module_name: String) -> String = {
 }
 
 fn generate_esm(iface_json: String, module_name: String) -> String = {
-  let iface = json.parse(iface_json) ?? json.null()
+  let iface = json.parse(iface_json) ?? value.null()
   let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
   // Exports (things the user calls) vs imports (things WASM calls back to JS).
   // `import` field on a fn marks it as a @extern(wasm, "mod", "name") target.
-  let is_import = (f: Value) => (json.get(f, "import") ?? json.null()) != json.null()
+  let is_import = (f: Value) => (value.get(f, "import") ?? value.null()) != value.null()
   let supported = fns |> list.filter((f) => not is_import(f) and is_supported_fn(f))
   let js_imports = fns |> list.filter((f) => is_import(f))
 
@@ -1273,8 +1273,8 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
   let map_helpers = {
     let (acc, _) = all_maps |> list.fold(([], []), (state, ty) => {
       let (lines, seen) = state
-      let k = json.get(ty, "key") ?? json.null()
-      let v = json.get(ty, "value") ?? json.null()
+      let k = value.get(ty, "key") ?? value.null()
+      let v = value.get(ty, "value") ?? value.null()
       let sig = "${type_sig(k)}_${type_sig(v)}"
       if list.contains(seen, sig) then (lines, seen)
       else (lines + emit_map_helpers(ty), seen + [sig])
@@ -1285,7 +1285,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
   let set_helpers = {
     let (acc, _) = all_sets |> list.fold(([], []), (state, ty) => {
       let (lines, seen) = state
-      let e = json.get(ty, "inner") ?? json.null()
+      let e = value.get(ty, "inner") ?? value.null()
       let sig = type_sig(e)
       if list.contains(seen, sig) then (lines, seen)
       else (lines + emit_set_helpers(ty), seen + [sig])
@@ -1731,7 +1731,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
       "  const out = {};",
     ]
     let per_import = js_imports |> list.flat_map((f) => {
-      let imp = json.get(f, "import") ?? json.null()
+      let imp = value.get(f, "import") ?? value.null()
       let mod_name = get_str(imp, "module")
       let fn_name = get_str(imp, "name")
       let params = get_arr(f, "params")
@@ -1779,7 +1779,7 @@ fn generate_esm(iface_json: String, module_name: String) -> String = {
 }
 
 fn generate_dts(iface_json: String, module_name: String) -> String = {
-  let iface = json.parse(iface_json) ?? json.null()
+  let iface = json.parse(iface_json) ?? value.null()
   let types = get_arr(iface, "types")
   let fns = get_arr(iface, "functions")
   let supported = fns |> list.filter((f) => is_supported_fn(f))
@@ -1842,7 +1842,7 @@ fn generate_dts(iface_json: String, module_name: String) -> String = {
       |> list.map((p) => "${get_str(p, "name")}: ${param_ty(p)}")
       |> list.join(", ")
     let almide_sig = almide_fn_signature(f)
-    let is_effect = json.as_bool(json.get(f, "effect") ?? json.from_bool(false)) ?? false
+    let is_effect = value.as_bool(value.get(f, "effect") ?? value.bool(false))? ?? false
     let throws_line = if is_effect then [" * @throws if the effect fn returned an error (Result.Err)."] else []
     let jsdoc = [
       "/**",

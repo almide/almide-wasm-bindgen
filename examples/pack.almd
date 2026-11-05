@@ -32,9 +32,9 @@ effect fn main() -> Unit = {
   // 1. interface
   println("[1/4] Compiling interface from ${source_path}...")
   let iface_json = process.exec("almide", ["compile", source_path, "--json"])!
-  let iface = json.parse(iface_json) ?? json.null()
+  let iface = json.parse(iface_json) ?? value.null()
   let module_name = if module_name_arg == ""
-    then (json.as_string(json.get(iface, "module") ?? json.null()) ?? "module")
+    then (value.as_string(value.get(iface, "module") ?? value.null())? ?? "module")
     else "${module_name_arg}"
 
   // Ensure outdir exists.
@@ -52,9 +52,9 @@ effect fn main() -> Unit = {
   let pkg = wasm_bindgen.generate_package_json(module_name, "0.1.0")
 
   // 4. write files
-  fs.write("${outdir}/${module_name}.js", esm)!
-  fs.write("${outdir}/${module_name}.d.ts", dts)!
-  fs.write("${outdir}/package.json", pkg)!
+  fs.write_text("${outdir}/${module_name}.js", esm)!
+  fs.write_text("${outdir}/${module_name}.d.ts", dts)!
+  fs.write_text("${outdir}/package.json", pkg)!
 
   println("[4/4] Done.")
   println("  ${outdir}/${module_name}.wasm")

@@ -1,12 +1,12 @@
 // Matrix chain: scale a by ka, scale b by kb, add together, compute elementwise result
 fn scale_add(a: Matrix, b: Matrix, ka: Float, kb: Float) -> Matrix =
-  matrix.add(matrix.scale(a, ka), matrix.scale(b, kb))
+  matrix.scale(a, ka) + matrix.scale(b, kb)
 
 // Deeper chain: normalize via (a - mean) / range
 fn shift_scale_square(m: Matrix, shift: Float, k: Float) -> Matrix = {
-  let shifted = matrix.sub(m, matrix.scale(matrix.ones(matrix.rows(m), matrix.cols(m)), shift))
+  let shifted = m - matrix.scale(matrix.ones(matrix.rows(m), matrix.cols(m)), shift)
   let scaled = matrix.scale(shifted, k)
-  matrix.mul(scaled, matrix.transpose(scaled))
+  scaled * matrix.transpose(scaled)
 }
 
 effect fn main() -> () = { println("ok") }
